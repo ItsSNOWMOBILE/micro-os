@@ -1,0 +1,218 @@
+/*
+ * pmm.c — Physical memory manager (bitmap allocator).
+ *
+ * Scans the memory map provided by the bootloader and builds a bitmap
+ * where bit N corresponds to physical page N (address N * 4096).
+ *
+ * A set bit means the page is FREE; a clear bit means USED/RESERVED.
+ * This convention lets us use FFS-style scanning to find free pages.
+ *
+ * The bitmap is placed at the start of the first usable region large
+ * enough to hold it (after the kernel).
+ */
+
+#include "pmm.h"
+#include "../../boot/bootinfo.h"
+#include "../string.h"
+
+static uint64_t *bitmap;
+static uint64_t  bitmap_size;    /* bytes */
+static uint64_t  total_pages;
+static uint64_t  free_count;
+static uint64_t  highest_page;
+
+/* ── Bit manipulation ────────────────────────────────────────────────────── */
+
+static inline void
+bitmap_set(uint64_t page)
+{
+    bitmap[page / 64] |= (1ULL << (page % 64));
+}
+
+static inline void
+bitmap_clear(uint64_t page)
+{
+    bitmap[page / 64] &= ~(1ULL << (page % 64));
+}
+
+static inline int
+bitmap_test(uint64_t page)
+{
+    return (bitmap[page / 64] >> (page % 64)) & 1;
+}
+
+/* ── Initialisation ──────────────────────────────────────────────────────── */
+
+void
+pmm_init(void *mmap, uint32_t mmap_count,
+         uint64_t kernel_phys, uint64_t kernel_size)
+{
+    MmapEntry *entries = (MmapEntry *)mmap;
+
+    /* Pass 1: find the highest usable address to size the bitmap. */
+    highest_page = 0;
+    for (uint32_t i = 0; i < mmap_count; i++) {
+        uint64_t end = entries[i].base + entries[i].length;
+        uint64_t end_page = end / PAGE_SIZE;
+        if (end_page > highest_page)
+            highest_page = end_page;
+    }
+
+    total_pages = highest_page;
+    bitmap_size = (total_pages + 63) / 64 * 8;  /* round up to 8-byte units */
+
+    /*
+     * Pass 2: find a usable region large enough to hold the bitmap.
+     * Skip the first 1 MiB (legacy BIOS area) and the kernel region.
+     */
+    bitmap = NULL;
+    for (uint32_t i = 0; i < mmap_count; i++) {
+        if (entries[i].type != MMAP_USABLE)
+            continue;
+
+        uint64_t base = entries[i].base;
+        uint64_t len  = entries[i].length;
+
+        /* Avoid the low 1 MiB. */
+        if (base < 0x100000) {
+            uint64_t skip = 0x100000 - base;
+            if (skip >= len)
+                continue;
+            base += skip;
+            len  -= skip;
+        }
+
+        /* Avoid the kernel region. */
+        uint64_t kend = kernel_phys + kernel_size;
+        if (base < kend && base + len > kernel_phys) {
+            if (base < kend) {
+                uint64_t skip = kend - base;
+                if (skip >= len)
+                    continue;
+                base += skip;
+                len  -= skip;
+            }
+        }
+
+        /* Align base up to page boundary. */
+        uint64_t aligned = (base + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t diff = aligned - base;
+        if (diff >= len)
+            continue;
+        len -= diff;
+        base = aligned;
+
+        if (len >= bitmap_size) {
+            bitmap = (uint64_t *)base;
+            break;
+        }
+    }
+
+    if (!bitmap)
+        return;  /* caller should panic */
+
+    /* Mark everything as used initially. */
+    memset(bitmap, 0, bitmap_size);
+    free_count = 0;
+
+    /* Pass 3: mark usable pages as free. */
+    for (uint32_t i = 0; i < mmap_count; i++) {
+        if (entries[i].type != MMAP_USABLE)
+            continue;
+
+        uint64_t base = entries[i].base;
+        uint64_t end  = base + entries[i].length;
+
+        /* Page-align inward. */
+        base = (base + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        end  = end & ~(uint64_t)(PAGE_SIZE - 1);
+
+        for (uint64_t addr = base; addr < end; addr += PAGE_SIZE) {
+            uint64_t page = addr / PAGE_SIZE;
+            if (page < total_pages) {
+                bitmap_set(page);
+                free_count++;
+            }
+        }
+    }
+
+    /* Reserve the low 1 MiB (BIOS area, real-mode IVT, etc). */
+    for (uint64_t page = 0; page < 0x100000 / PAGE_SIZE; page++) {
+        if (bitmap_test(page)) {
+            bitmap_clear(page);
+            free_count--;
+        }
+    }
+
+    /* Reserve the kernel itself. */
+    uint64_t kstart_page = kernel_phys / PAGE_SIZE;
+    uint64_t kend_page   = (kernel_phys + kernel_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint64_t page = kstart_page; page < kend_page; page++) {
+        if (bitmap_test(page)) {
+            bitmap_clear(page);
+            free_count--;
+        }
+    }
+
+    /* Reserve the bitmap itself. */
+    uint64_t bm_start = (uint64_t)bitmap / PAGE_SIZE;
+    uint64_t bm_end   = ((uint64_t)bitmap + bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint64_t page = bm_start; page < bm_end; page++) {
+        if (bitmap_test(page)) {
+            bitmap_clear(page);
+            free_count--;
+        }
+    }
+}
+
+/* ── Allocation / Free ───────────────────────────────────────────────────── */
+
+void *
+pmm_alloc_page(void)
+{
+    uint64_t qwords = bitmap_size / 8;
+
+    for (uint64_t i = 0; i < qwords; i++) {
+        if (bitmap[i] == 0)
+            continue;
+
+        /* __builtin_ctzll: count trailing zeros — finds the lowest set bit. */
+        int bit = __builtin_ctzll(bitmap[i]);
+        uint64_t page = i * 64 + bit;
+        if (page >= total_pages)
+            return NULL;
+
+        bitmap_clear(page);
+        free_count--;
+
+        void *addr = (void *)(page * PAGE_SIZE);
+        memset(addr, 0, PAGE_SIZE);
+        return addr;
+    }
+
+    return NULL;
+}
+
+void
+pmm_free_page(void *addr)
+{
+    uint64_t page = (uint64_t)addr / PAGE_SIZE;
+    if (page >= total_pages)
+        return;
+    if (!bitmap_test(page)) {
+        bitmap_set(page);
+        free_count++;
+    }
+}
+
+uint64_t
+pmm_free_pages(void)
+{
+    return free_count;
+}
+
+uint64_t
+pmm_total_pages(void)
+{
+    return total_pages;
+}
