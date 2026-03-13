@@ -19,8 +19,8 @@
 #define IRQ0_VECTOR  32
 
 static volatile uint64_t g_ticks;
-
 static bool sched_active;
+static volatile bool in_schedule;
 
 static void
 timer_handler(InterruptFrame *frame)
@@ -28,11 +28,15 @@ timer_handler(InterruptFrame *frame)
     (void)frame;
     g_ticks++;
 
-    /* Send EOI to master PIC (must be before schedule to avoid masking). */
+    /* Send EOI to master PIC. */
     outb(0x20, 0x20);
 
-    if (sched_active)
+    /* Preemptive scheduling. */
+    if (sched_active && !in_schedule) {
+        in_schedule = true;
         sched_schedule();
+        in_schedule = false;
+    }
 }
 
 void timer_enable_preemption(void) { sched_active = true; }
@@ -42,6 +46,7 @@ timer_init(uint32_t frequency_hz)
 {
     g_ticks = 0;
     sched_active = false;
+    in_schedule = false;
 
     uint16_t divisor = (uint16_t)(PIT_BASE_HZ / frequency_hz);
     if (divisor == 0) divisor = 1;

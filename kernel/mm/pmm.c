@@ -41,6 +41,59 @@ bitmap_test(uint64_t page)
     return (bitmap[page / 64] >> (page % 64)) & 1;
 }
 
+static inline uint64_t
+popcount64(uint64_t x)
+{
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+    return (x * 0x0101010101010101ULL) >> 56;
+}
+
+/* Bulk set a range of bits (mark pages FREE). Returns count of newly set bits. */
+static uint64_t
+bitmap_set_range(uint64_t start, uint64_t end)
+{
+    uint64_t count = 0;
+    while (start < end && (start % 64) != 0) {
+        if (!bitmap_test(start)) { bitmap_set(start); count++; }
+        start++;
+    }
+    while (start + 64 <= end) {
+        uint64_t idx = start / 64;
+        count += 64 - popcount64(bitmap[idx]);
+        bitmap[idx] = ~0ULL;
+        start += 64;
+    }
+    while (start < end) {
+        if (!bitmap_test(start)) { bitmap_set(start); count++; }
+        start++;
+    }
+    return count;
+}
+
+/* Bulk clear a range of bits (mark pages USED). Returns count of newly cleared bits. */
+static uint64_t
+bitmap_clear_range(uint64_t start, uint64_t end)
+{
+    uint64_t count = 0;
+    while (start < end && (start % 64) != 0) {
+        if (bitmap_test(start)) { bitmap_clear(start); count++; }
+        start++;
+    }
+    while (start + 64 <= end) {
+        uint64_t idx = start / 64;
+        count += popcount64(bitmap[idx]);
+        bitmap[idx] = 0;
+        start += 64;
+    }
+    while (start < end) {
+        if (bitmap_test(start)) { bitmap_clear(start); count++; }
+        start++;
+    }
+    return count;
+}
+
 /* ── Initialisation ──────────────────────────────────────────────────────── */
 
 void
@@ -115,7 +168,7 @@ pmm_init(void *mmap, uint32_t mmap_count,
     memset(bitmap, 0, bitmap_size);
     free_count = 0;
 
-    /* Pass 3: mark usable pages as free. */
+    /* Pass 3: mark usable pages as free (bulk). */
     for (uint32_t i = 0; i < mmap_count; i++) {
         if (entries[i].type != MMAP_USABLE)
             continue;
@@ -127,42 +180,22 @@ pmm_init(void *mmap, uint32_t mmap_count,
         base = (base + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
         end  = end & ~(uint64_t)(PAGE_SIZE - 1);
 
-        for (uint64_t addr = base; addr < end; addr += PAGE_SIZE) {
-            uint64_t page = addr / PAGE_SIZE;
-            if (page < total_pages) {
-                bitmap_set(page);
-                free_count++;
-            }
-        }
+        uint64_t start_page = base / PAGE_SIZE;
+        uint64_t end_page   = end / PAGE_SIZE;
+        if (end_page > total_pages) end_page = total_pages;
+        free_count += bitmap_set_range(start_page, end_page);
     }
 
-    /* Reserve the low 1 MiB (BIOS area, real-mode IVT, etc). */
-    for (uint64_t page = 0; page < 0x100000 / PAGE_SIZE; page++) {
-        if (bitmap_test(page)) {
-            bitmap_clear(page);
-            free_count--;
-        }
-    }
+    /* Reserve the low 1 MiB, kernel, and bitmap (bulk). */
+    free_count -= bitmap_clear_range(0, 0x100000 / PAGE_SIZE);
 
-    /* Reserve the kernel itself. */
     uint64_t kstart_page = kernel_phys / PAGE_SIZE;
     uint64_t kend_page   = (kernel_phys + kernel_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    for (uint64_t page = kstart_page; page < kend_page; page++) {
-        if (bitmap_test(page)) {
-            bitmap_clear(page);
-            free_count--;
-        }
-    }
+    free_count -= bitmap_clear_range(kstart_page, kend_page);
 
-    /* Reserve the bitmap itself. */
     uint64_t bm_start = (uint64_t)bitmap / PAGE_SIZE;
     uint64_t bm_end   = ((uint64_t)bitmap + bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    for (uint64_t page = bm_start; page < bm_end; page++) {
-        if (bitmap_test(page)) {
-            bitmap_clear(page);
-            free_count--;
-        }
-    }
+    free_count -= bitmap_clear_range(bm_start, bm_end);
 }
 
 /* ── Allocation / Free ───────────────────────────────────────────────────── */

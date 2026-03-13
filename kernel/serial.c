@@ -23,17 +23,17 @@ serial_init(void)
     outb(COM1 + 4, 0x0B);   /* IRQs enabled, RTS/DSR set    */
 }
 
-static int
-is_transmit_empty(void)
+static inline void
+serial_wait_ready(void)
 {
-    return inb(COM1 + 5) & 0x20;
+    while (!(inb(COM1 + 5) & 0x20))
+        ;
 }
 
 void
 serial_putchar(char c)
 {
-    while (!is_transmit_empty())
-        ;
+    serial_wait_ready();
     outb(COM1, (uint8_t)c);
 }
 
@@ -41,8 +41,11 @@ void
 serial_write(const char *s)
 {
     while (*s) {
-        if (*s == '\n')
-            serial_putchar('\r');
-        serial_putchar(*s++);
+        serial_wait_ready();
+        if (*s == '\n') {
+            outb(COM1, '\r');
+            serial_wait_ready();
+        }
+        outb(COM1, (uint8_t)*s++);
     }
 }

@@ -27,18 +27,12 @@ static FreeBlock *free_list;
 void
 heap_init(void)
 {
-    /* Allocate a contiguous run of pages for the initial heap.
-     * For simplicity, we allocate them individually and use only
-     * the first contiguous block.  A real allocator would use
-     * a virtual address range and map pages on demand. */
     void *base = pmm_alloc_page();
     if (!base) return;
 
-    /* Allocate more pages and hope they're contiguous (they usually
-     * are right after PMM init when memory is fresh). */
     for (int i = 1; i < HEAP_PAGES; i++) {
         void *p = pmm_alloc_page();
-        (void)p;  /* we rely on contiguous allocation */
+        (void)p;
     }
 
     size_t total = HEAP_PAGES * PAGE_SIZE;
@@ -66,21 +60,16 @@ kmalloc(size_t size)
 
     while (cur) {
         if (cur->size >= needed) {
-            /* Can we split? */
             if (cur->size >= needed + MIN_BLOCK + 16) {
-                /* Split: create a new free block after our allocation. */
                 FreeBlock *remainder = (FreeBlock *)((uint8_t *)cur + needed);
                 remainder->size = cur->size - needed;
                 remainder->next = cur->next;
                 *prev = remainder;
                 cur->size = needed;
             } else {
-                /* Use the whole block. */
                 *prev = cur->next;
-                /* size stays as-is */
             }
 
-            /* Store size in header, return pointer past it. */
             *(size_t *)cur = cur->size;
             return (uint8_t *)cur + HEADER_SIZE;
         }
@@ -98,7 +87,7 @@ kmalloc(size_t size)
 
     /* Add to free list and retry. */
     *prev = blk;
-    return kmalloc(size);  /* recurse once */
+    return kmalloc(size);
 }
 
 /* ── Free ────────────────────────────────────────────────────────────────── */
@@ -108,12 +97,11 @@ kfree(void *ptr)
 {
     if (!ptr) return;
 
-    /* Step back past the header to get the block address and size. */
     FreeBlock *blk = (FreeBlock *)((uint8_t *)ptr - HEADER_SIZE);
     size_t block_size = *(size_t *)blk;
     blk->size = block_size;
 
-    /* Insert into the sorted free list and coalesce. */
+    /* Insert into the sorted free list. */
     FreeBlock **prev = &free_list;
     FreeBlock  *cur  = free_list;
 
@@ -132,9 +120,12 @@ kfree(void *ptr)
     }
 
     /* Coalesce with previous block. */
-    if (*prev != blk) {
-        FreeBlock *p = (FreeBlock *)((uint8_t *)prev - __builtin_offsetof(FreeBlock, next));
-        /* Recalculate prev from the free list to be safe. */
-        (void)p;
+    if (prev != &free_list) {
+        FreeBlock *p = (FreeBlock *)((uint8_t *)prev -
+                        __builtin_offsetof(FreeBlock, next));
+        if ((uint8_t *)p + p->size == (uint8_t *)blk) {
+            p->size += blk->size;
+            p->next  = blk->next;
+        }
     }
 }

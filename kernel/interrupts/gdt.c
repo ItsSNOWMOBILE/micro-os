@@ -5,12 +5,12 @@
  *   [0] Null descriptor
  *   [1] Kernel code (CS)  — Ring 0, 64-bit
  *   [2] Kernel data (DS)  — Ring 0
- *   [3] User code   (CS)  — Ring 3, 64-bit
- *   [4] User data   (DS)  — Ring 3
+ *   [3] User data   (DS)  — Ring 3       (before code for SYSRET)
+ *   [4] User code   (CS)  — Ring 3, 64-bit
  *   [5] TSS descriptor    — 16 bytes (occupies slots 5 and 6)
  *
  * The TSS is needed so the CPU can switch to a known-good stack on
- * interrupts/exceptions (IST entries) and on Ring 3 → Ring 0 transitions.
+ * interrupts/exceptions (IST entries) and on Ring 3 -> Ring 0 transitions.
  */
 
 #include "gdt.h"
@@ -24,7 +24,7 @@ typedef struct __attribute__((packed)) {
     uint32_t reserved0;
     uint64_t rsp[3];          /* RSP for Ring 0, 1, 2 */
     uint64_t reserved1;
-    uint64_t ist[7];          /* IST1–IST7 */
+    uint64_t ist[7];          /* IST1-IST7 */
     uint64_t reserved2;
     uint16_t reserved3;
     uint16_t iomap_base;
@@ -32,6 +32,7 @@ typedef struct __attribute__((packed)) {
 
 static TSS tss;
 static uint8_t ist1_stack[IST_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t rsp0_stack[IST_STACK_SIZE * 2] __attribute__((aligned(16)));
 
 /* ── GDT entries ─────────────────────────────────────────────────────────── */
 
@@ -62,7 +63,7 @@ typedef struct __attribute__((packed)) {
 
 /*
  * 7 slots: null + 4 segment descriptors + 1 TSS (which uses 2 slots).
- * Total = 7 × 8 = 56 bytes.
+ * Total = 7 x 8 = 56 bytes.
  */
 static uint8_t gdt_raw[7 * 8] __attribute__((aligned(16)));
 
@@ -99,6 +100,12 @@ extern void gdt_flush(uint64_t gdtr_ptr, uint16_t code_sel, uint16_t data_sel);
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 void
+gdt_set_rsp0(uint64_t rsp0)
+{
+    tss.rsp[0] = rsp0;
+}
+
+void
 gdt_init(void)
 {
     memset(gdt_raw, 0, sizeof(gdt_raw));
@@ -106,6 +113,8 @@ gdt_init(void)
 
     /* IST1: used for double-fault and NMI handlers. */
     tss.ist[0] = (uint64_t)(ist1_stack + IST_STACK_SIZE);
+    /* RSP0: stack used when transitioning from Ring 3 to Ring 0. */
+    tss.rsp[0] = (uint64_t)(rsp0_stack + sizeof(rsp0_stack));
     tss.iomap_base = sizeof(TSS);
 
     /* [0] Null */
@@ -113,11 +122,11 @@ gdt_init(void)
     set_entry(1, 0x9A, 0xA);   /* 0x9A = P|DPL0|S|code|readable; 0xA = L|G */
     /* [2] Kernel data: present, DPL 0, data, writable */
     set_entry(2, 0x92, 0xC);   /* 0x92 = P|DPL0|S|data|writable; 0xC = Sz|G */
-    /* [3] User code: present, DPL 3, code, readable, 64-bit */
-    set_entry(3, 0xFA, 0xA);   /* 0xFA = P|DPL3|S|code|readable */
-    /* [4] User data: present, DPL 3, data, writable */
-    set_entry(4, 0xF2, 0xC);   /* 0xF2 = P|DPL3|S|data|writable */
-    /* [5–6] TSS */
+    /* [3] User data: present, DPL 3, data, writable */
+    set_entry(3, 0xF2, 0xC);   /* 0xF2 = P|DPL3|S|data|writable */
+    /* [4] User code: present, DPL 3, code, readable, 64-bit */
+    set_entry(4, 0xFA, 0xA);   /* 0xFA = P|DPL3|S|code|readable */
+    /* [5-6] TSS */
     set_tss(5, (uint64_t)&tss, sizeof(TSS) - 1);
 
     GDTR gdtr = {

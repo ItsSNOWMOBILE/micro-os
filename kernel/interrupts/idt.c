@@ -2,7 +2,7 @@
  * idt.c — Interrupt Descriptor Table setup.
  *
  * Installs 256 IDT entries.  The first 32 are CPU exceptions; vectors
- * 32–47 are remapped PIC IRQs; vector 0x80 is reserved for syscalls.
+ * 32-47 are remapped PIC IRQs; vector 0x80 is reserved for syscalls.
  * Each entry points to an assembly stub (isr_stub_N) that pushes the
  * vector number and a uniform error code, then calls isr_dispatch.
  */
@@ -12,6 +12,8 @@
 #include "../string.h"
 #include "../console.h"
 #include "../kernel.h"
+#include "../serial.h"
+#include "../sched/task.h"
 
 /* ── IDT gate descriptor ─────────────────────────────────────────────────── */
 
@@ -61,24 +63,19 @@ set_gate(int vector, uint64_t handler, uint8_t ist, uint8_t type_attr)
 static void
 pic_remap(void)
 {
-    /* ICW1: begin init, expect ICW4 */
     outb(PIC1_CMD,  0x11); io_wait();
     outb(PIC2_CMD,  0x11); io_wait();
-    /* ICW2: vector offsets */
-    outb(PIC1_DATA, 0x20); io_wait();  /* IRQ 0–7  → vectors 32–39 */
-    outb(PIC2_DATA, 0x28); io_wait();  /* IRQ 8–15 → vectors 40–47 */
-    /* ICW3: wiring */
-    outb(PIC1_DATA, 0x04); io_wait();  /* slave on IRQ2 */
+    outb(PIC1_DATA, 0x20); io_wait();
+    outb(PIC2_DATA, 0x28); io_wait();
+    outb(PIC1_DATA, 0x04); io_wait();
     outb(PIC2_DATA, 0x02); io_wait();
-    /* ICW4: 8086 mode */
     outb(PIC1_DATA, 0x01); io_wait();
     outb(PIC2_DATA, 0x01); io_wait();
-    /* Mask all IRQs initially; drivers unmask what they need. */
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
 }
 
-/* ── Dispatch ────────────────────────────────────────────────────────────── */
+/* ── Exception handlers ──────────────────────────────────────────────────── */
 
 static const char *exception_names[32] = {
     "Division by Zero",        "Debug",
@@ -99,6 +96,138 @@ static const char *exception_names[32] = {
     "Security Exception",      "Reserved",
 };
 
+static void
+dump_registers(InterruptFrame *frame)
+{
+    kprintf("  RIP = 0x%lx  RSP = 0x%lx\n", frame->rip, frame->rsp);
+    kprintf("  CS  = 0x%lx  SS  = 0x%lx\n", frame->cs, frame->ss);
+    kprintf("  RAX = 0x%lx  RBX = 0x%lx\n", frame->rax, frame->rbx);
+    kprintf("  RCX = 0x%lx  RDX = 0x%lx\n", frame->rcx, frame->rdx);
+    kprintf("  RSI = 0x%lx  RDI = 0x%lx\n", frame->rsi, frame->rdi);
+    kprintf("  RBP = 0x%lx  R8  = 0x%lx\n", frame->rbp, frame->r8);
+    kprintf("  R9  = 0x%lx  R10 = 0x%lx\n", frame->r9,  frame->r10);
+    kprintf("  R11 = 0x%lx  R12 = 0x%lx\n", frame->r11, frame->r12);
+    kprintf("  R13 = 0x%lx  R14 = 0x%lx\n", frame->r13, frame->r14);
+    kprintf("  R15 = 0x%lx  RFLAGS = 0x%lx\n", frame->r15, frame->rflags);
+    kprintf("  Error code = 0x%lx\n", frame->error_code);
+}
+
+static void
+page_fault_handler(InterruptFrame *frame)
+{
+    uint64_t cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+
+    kprintf("\n*** PAGE FAULT ***\n");
+    kprintf("  Faulting address: 0x%lx\n", cr2);
+    kprintf("  Error: %s %s %s%s\n",
+            (frame->error_code & 1) ? "protection-violation" : "not-present",
+            (frame->error_code & 2) ? "write" : "read",
+            (frame->error_code & 4) ? "user" : "kernel",
+            (frame->error_code & 16) ? " instruction-fetch" : "");
+    dump_registers(frame);
+
+    /* If the fault is from a user-mode task (CS RPL == 3), kill the task. */
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("kernel page fault");
+}
+
+static void
+gpf_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** GENERAL PROTECTION FAULT ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("kernel GPF");
+}
+
+static void
+double_fault_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** DOUBLE FAULT ***\n");
+    dump_registers(frame);
+    panic("double fault");
+}
+
+static void
+invalid_opcode_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** INVALID OPCODE ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("invalid opcode");
+}
+
+static void
+division_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** DIVISION BY ZERO ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("division by zero");
+}
+
+static void
+breakpoint_handler(InterruptFrame *frame)
+{
+    serial_write("\n*** BREAKPOINT ***\n");
+    /* Print RIP in hex to serial. */
+    serial_write("  RIP = 0x");
+    uint64_t rip = frame->rip;
+    char hex[17];
+    for (int i = 15; i >= 0; i--) {
+        int digit = rip & 0xF;
+        hex[i] = digit < 10 ? '0' + digit : 'a' + digit - 10;
+        rip >>= 4;
+    }
+    hex[16] = '\0';
+    serial_write(hex);
+    serial_write("\n");
+
+    serial_write("  RSP = 0x");
+    uint64_t rsp = frame->rsp;
+    for (int i = 15; i >= 0; i--) {
+        int digit = rsp & 0xF;
+        hex[i] = digit < 10 ? '0' + digit : 'a' + digit - 10;
+        rsp >>= 4;
+    }
+    serial_write(hex);
+    serial_write("\n");
+
+    kprintf("\n*** BREAKPOINT ***\n");
+    dump_registers(frame);
+    panic("breakpoint exception");
+}
+
+/* ── Dispatch ────────────────────────────────────────────────────────────── */
+
 void
 isr_dispatch(InterruptFrame *frame)
 {
@@ -110,13 +239,16 @@ isr_dispatch(InterruptFrame *frame)
     }
 
     if (vector < 32) {
+        serial_write("\n*** EXCEPTION ");
+        /* Quick decimal print for serial. */
+        if (vector >= 10) serial_putchar('0' + vector / 10);
+        serial_putchar('0' + vector % 10);
+        serial_write(": ");
+        serial_write(exception_names[vector]);
+        serial_write(" ***\n");
         kprintf("\n*** EXCEPTION %u: %s ***\n", (unsigned)vector,
                 exception_names[vector]);
-        kprintf("  error_code = 0x%lx\n", frame->error_code);
-        kprintf("  RIP = 0x%lx  RSP = 0x%lx\n", frame->rip, frame->rsp);
-        kprintf("  CS  = 0x%lx  SS  = 0x%lx\n", frame->cs, frame->ss);
-        kprintf("  RAX = 0x%lx  RBX = 0x%lx\n", frame->rax, frame->rbx);
-        kprintf("  RCX = 0x%lx  RDX = 0x%lx\n", frame->rcx, frame->rdx);
+        dump_registers(frame);
         panic("unhandled exception");
     }
 
@@ -145,13 +277,21 @@ idt_init(void)
     /* 0x8E = present, DPL 0, interrupt gate (64-bit). */
     for (int i = 0; i < IDT_ENTRIES; i++) {
         uint8_t ist = 0;
-        if (i == 2 || i == 8)   /* NMI and Double Fault use IST1 */
+        if (i == 2 || i == 8)
             ist = 1;
         set_gate(i, (uint64_t)isr_stub_table[i], ist, 0x8E);
     }
 
     /* Syscall gate: DPL 3 so user-mode can trigger it via INT 0x80. */
     set_gate(0x80, (uint64_t)isr_stub_table[0x80], 0, 0xEE);
+
+    /* Register built-in exception handlers. */
+    handlers[0]  = division_handler;
+    handlers[3]  = breakpoint_handler;
+    handlers[6]  = invalid_opcode_handler;
+    handlers[8]  = double_fault_handler;
+    handlers[13] = gpf_handler;
+    handlers[14] = page_fault_handler;
 
     IDTR idtr = {
         .limit = sizeof(idt) - 1,

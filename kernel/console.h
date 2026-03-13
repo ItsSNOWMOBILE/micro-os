@@ -15,4 +15,9 @@ void console_clear(void);
 /* Formatted print (subset: %s, %d, %u, %x, %p, %c, %%). */
 void kprintf(const char *fmt, ...);
 
+/* Framebuffer accessors (used by mouse driver). */
+uint32_t *console_get_pixels(void);
+uint32_t  console_get_pitch(void);
+void      console_get_screen_size(uint32_t *w, uint32_t *h);
+
 #endif /* CONSOLE_H */
