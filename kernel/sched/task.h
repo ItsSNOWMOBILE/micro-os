@@ -1,15 +1,15 @@
 /*
  * task.h — Task (thread) management.
  *
- * Each task has its own kernel stack and saved register context.  The
- * scheduler is cooperative for now (yield-based), with a timer-driven
- * preemptive path added once the PIT is running.
+ * Each task has its own kernel stack and saved register context.
+ * Supports priority-based scheduling and task lifecycle management.
  */
 
 #ifndef TASK_H
 #define TASK_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define TASK_STACK_SIZE  (4096 * 4)  /* 16 KiB per task */
 #define MAX_TASKS        64
@@ -18,8 +18,16 @@ typedef enum {
     TASK_READY,
     TASK_RUNNING,
     TASK_SLEEPING,
+    TASK_BLOCKED,
     TASK_DEAD,
 } TaskState;
+
+/* Priority levels: lower number = higher priority. */
+#define PRIORITY_HIGH    0
+#define PRIORITY_NORMAL  1
+#define PRIORITY_LOW     2
+#define PRIORITY_IDLE    3
+#define NUM_PRIORITIES   4
 
 typedef struct {
     uint64_t rsp;   /* saved stack pointer — first field for asm access */
@@ -37,17 +45,34 @@ typedef struct Task {
     TaskContext ctx;
     uint64_t   id;
     TaskState  state;
-    uint64_t   wake_tick;     /* for sleep */
-    uint8_t   *stack_base;    /* bottom of allocated stack */
+    uint64_t   wake_tick;      /* for sleep */
+    uint8_t   *stack_base;     /* bottom of allocated stack */
     const char *name;
+    int        priority;       /* 0=high, 3=idle */
+    int        exit_code;
+    uint64_t   parent_id;      /* ID of parent task */
+    uint64_t   wait_for_id;    /* task ID we're waiting on (0 = none) */
 } Task;
 
 void  sched_init(void);
 Task *task_create(const char *name, void (*entry)(void));
+Task *task_create_prio(const char *name, void (*entry)(void), int priority);
 void  sched_yield(void);
 void  sched_schedule(void);          /* called from timer ISR */
 void  sched_sleep(uint64_t ticks);
 Task *sched_current(void);
+
+/* Wait for a specific task to exit. Returns its exit code. */
+int   sched_wait(uint64_t task_id);
+
+/* Exit the current task with a code. */
+void  sched_exit(int code);
+
+/* Check if any non-dead tasks exist at the given priority. */
+bool  sched_any_priority(int priority);
+
+/* Print task list (for ps command). */
+void  sched_list_tasks(void);
 
 /* Assembly context switch. */
 extern void context_switch(TaskContext *old_ctx, TaskContext *new_ctx);
