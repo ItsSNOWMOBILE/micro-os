@@ -195,9 +195,6 @@ mouse_handler(InterruptFrame *frame)
     last_dx = (int8_t)dx;
     last_dy = (int8_t)dy;
 
-    /* Erase old cursor. */
-    erase_cursor();
-
     /* Update position (Y is inverted: PS/2 positive = up, screen positive = down). */
     mouse_px += dx;
     mouse_py -= dy;
@@ -208,8 +205,12 @@ mouse_handler(InterruptFrame *frame)
     if (mouse_px >= (int32_t)screen_w) mouse_px = screen_w - 1;
     if (mouse_py >= (int32_t)screen_h) mouse_py = screen_h - 1;
 
-    /* Draw new cursor. */
-    draw_cursor(mouse_px, mouse_py);
+    /* Only update the cursor if the console isn't mid-write.
+     * The console's cursor_guard_leave will redraw us when it's done. */
+    if (!console_is_writing()) {
+        erase_cursor();
+        draw_cursor(mouse_px, mouse_py);
+    }
 
 eoi:
     /* IRQ 12 is on the slave PIC — send EOI to both. */
@@ -273,8 +274,9 @@ mouse_init(void)
     mask &= ~(1 << 2);
     outb(0x21, mask);
 
-    /* Draw initial cursor. */
+    /* Draw initial cursor and tell the console to coordinate with us. */
     draw_cursor(mouse_px, mouse_py);
+    console_set_mouse_ready();
 }
 
 void
@@ -291,3 +293,16 @@ mouse_get_state(MouseState *out)
 
 int32_t mouse_x(void) { return mouse_px; }
 int32_t mouse_y(void) { return mouse_py; }
+
+void
+mouse_hide_cursor(void)
+{
+    erase_cursor();
+}
+
+void
+mouse_show_cursor(void)
+{
+    if (!cursor_visible)
+        draw_cursor(mouse_px, mouse_py);
+}

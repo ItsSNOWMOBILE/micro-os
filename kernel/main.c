@@ -133,7 +133,8 @@ resolve_abs(const char *input, char *out, int outlen)
         } else if (strcmp(start, "..") == 0) {
             if (depth > 0) depth--;
         } else {
-            components[depth++] = start;
+            if (depth < 64)
+                components[depth++] = start;
         }
     }
 
@@ -521,6 +522,7 @@ shell_cmd_stat(const char *arg)
 static void
 shell_redraw_from(char *line, int len, int cursor)
 {
+    console_begin_batch();
     /* Redraw from cursor to end of line, then erase any trailing char. */
     for (int i = cursor; i < len; i++)
         console_putchar(line[i]);
@@ -528,6 +530,7 @@ shell_redraw_from(char *line, int len, int cursor)
     /* Move cursor back to the right position. */
     for (int i = 0; i < len - cursor + 1; i++)
         console_putchar('\b');
+    console_end_batch();
 }
 
 /* ── Tab completion (bash-style) ────────────────────────────────────────── */
@@ -731,10 +734,12 @@ shell_tab_complete(char *line, int *pos_out, int *len_out, int maxlen)
 
         /* Redraw from the original cursor position. */
         line[len] = '\0';
+        console_begin_batch();
         for (int i = *pos_out; i < len; i++)
             console_putchar(line[i]);
         for (int i = len; i > pos; i--)
             console_putchar('\b');
+        console_end_batch();
 
         *pos_out = pos;
         *len_out = len;
@@ -767,10 +772,12 @@ shell_tab_complete(char *line, int *pos_out, int *len_out, int maxlen)
         }
 
         line[len] = '\0';
+        console_begin_batch();
         for (int i = *pos_out; i < len; i++)
             console_putchar(line[i]);
         for (int i = len; i > pos; i--)
             console_putchar('\b');
+        console_end_batch();
 
         *pos_out = pos;
         *len_out = len;
@@ -1014,17 +1021,21 @@ shell_task(void)
 
         } else if (key == KEY_HOME) {
             last_was_tab = false;
+            console_begin_batch();
             while (pos > 0) {
                 pos--;
                 console_putchar('\b');
             }
+            console_end_batch();
 
         } else if (key == KEY_END) {
             last_was_tab = false;
+            console_begin_batch();
             while (pos < len) {
                 console_putchar(line[pos]);
                 pos++;
             }
+            console_end_batch();
 
         } else if (key == KEY_DELETE) {
             last_was_tab = false;
@@ -1038,12 +1049,13 @@ shell_task(void)
             /* Ctrl+L: clear screen. */
             last_was_tab = false;
             console_clear();
+            console_begin_batch();
             shell_print_prompt();
             for (int i = 0; i < len; i++)
                 console_putchar(line[i]);
-            /* Move cursor back to pos. */
             for (int i = len; i > pos; i--)
                 console_putchar('\b');
+            console_end_batch();
 
         } else if (key >= 0x80) {
             /* Other special keys (arrows up/down, F-keys, etc.) — ignore. */
@@ -1058,13 +1070,13 @@ shell_task(void)
                 memmove(&line[pos + 1], &line[pos], len - pos);
             line[pos] = (char)key;
             len++;
-            /* Print from cursor to end. */
+            console_begin_batch();
             for (int i = pos; i < len; i++)
                 console_putchar(line[i]);
             pos++;
-            /* Move cursor back to right position. */
             for (int i = len; i > pos; i--)
                 console_putchar('\b');
+            console_end_batch();
         }
     }
 }

@@ -225,12 +225,6 @@ keyboard_handler(InterruptFrame *frame)
         kbd_push((uint16_t)(c - 'A' + 1));
         goto eoi;
     }
-    /* Ctrl+L = clear screen (0x0C) */
-    if (ctrl_held && (c == 'l' || c == 'L')) {
-        kbd_push(0x0C);
-        goto eoi;
-    }
-
     kbd_push((uint16_t)c);
 
 eoi:
@@ -268,10 +262,8 @@ keyboard_has_key(void)
 uint16_t
 keyboard_getchar(void)
 {
-    while (kbd_read == kbd_write) {
-        __asm__ volatile("sti; hlt; cli");
-    }
-    sti();
+    while (kbd_read == kbd_write)
+        __asm__ volatile("sti; hlt");
 
     uint16_t c = kbd_buffer[kbd_read];
     kbd_read = (kbd_read + 1) % KBD_BUFFER_SIZE;

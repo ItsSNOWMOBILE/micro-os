@@ -19,6 +19,10 @@ typedef struct {
 void mouse_init(void);
 void mouse_get_state(MouseState *out);
 
+/* Hide/show the cursor around framebuffer writes to prevent artifacts. */
+void mouse_hide_cursor(void);
+void mouse_show_cursor(void);
+
 /* Called by the console to get cursor position for rendering. */
 int32_t mouse_x(void);
 int32_t mouse_y(void);

@@ -9,7 +9,14 @@
 #include "console.h"
 #include "string.h"
 #include "font8x16.h"
+#include "drivers/mouse.h"
+#include "kernel.h"
 #include <stdarg.h>
+
+/* Set once mouse_init has been called. */
+static bool mouse_ready;
+/* Nesting counter: >0 means cursor is already hidden by an outer call. */
+static volatile int cursor_hidden_depth;
 
 static Framebuffer g_fb;
 static uint32_t   *g_pixels;
@@ -85,35 +92,85 @@ console_init(Framebuffer *fb)
     console_clear();
 }
 
+/*
+ * Hide the mouse cursor before a full-screen operation (clear, scroll).
+ * For individual character draws, we check overlap instead.
+ */
+static inline void
+cursor_guard_enter(void)
+{
+    if (!mouse_ready) return;
+    cli();
+    if (cursor_hidden_depth++ == 0)
+        mouse_hide_cursor();
+    sti();
+}
+
+static inline void
+cursor_guard_leave(void)
+{
+    if (!mouse_ready) return;
+    cli();
+    if (--cursor_hidden_depth == 0)
+        mouse_show_cursor();
+    sti();
+}
+
+/*
+ * Check if a character cell overlaps the mouse cursor.
+ * If so, hide cursor before drawing and show after.
+ */
+static inline bool
+char_overlaps_cursor(uint32_t col, uint32_t row)
+{
+    if (!mouse_ready) return false;
+    int32_t cx = mouse_x();
+    int32_t cy = mouse_y();
+    int32_t x0 = (int32_t)(col * 8);
+    int32_t y0 = (int32_t)(row * 16);
+    /* CURSOR_W=8, CURSOR_H=12 from mouse.c */
+    return !(x0 + 8 <= cx || cx + 8 <= x0 ||
+             y0 + 16 <= cy || cy + 12 <= y0);
+}
+
 void
 console_clear(void)
 {
+    cursor_guard_enter();
     memset(g_pixels, 0, g_fb.height * g_fb.pitch);
     g_cx = 0;
     g_cy = 0;
+    cursor_guard_leave();
 }
 
 void
 console_putchar(char c)
 {
+    bool need_hide = false;
+
     if (c == '\n') {
         g_cx = 0;
         g_cy++;
     } else if (c == '\r') {
         g_cx = 0;
     } else if (c == '\b') {
-        /* Backspace: move cursor back and erase the character. */
         if (g_cx > 0) {
             g_cx--;
         } else if (g_cy > 0) {
             g_cy--;
             g_cx = g_cols - 1;
         }
+        need_hide = char_overlaps_cursor(g_cx, g_cy);
+        if (need_hide) cursor_guard_enter();
         draw_char(g_cx, g_cy, ' ');
+        if (need_hide) cursor_guard_leave();
     } else if (c == '\t') {
         g_cx = (g_cx + 4) & ~3u;
     } else {
+        need_hide = char_overlaps_cursor(g_cx, g_cy);
+        if (need_hide) cursor_guard_enter();
         draw_char(g_cx, g_cy, c);
+        if (need_hide) cursor_guard_leave();
         g_cx++;
     }
 
@@ -123,7 +180,10 @@ console_putchar(char c)
     }
 
     if (g_cy >= g_rows) {
+        /* Scroll affects the entire framebuffer — always guard. */
+        cursor_guard_enter();
         scroll_up();
+        cursor_guard_leave();
         g_cy = g_rows - 1;
     }
 }
@@ -135,6 +195,11 @@ void console_get_screen_size(uint32_t *w, uint32_t *h)
     *w = g_fb.width;
     *h = g_fb.height;
 }
+
+void console_set_mouse_ready(void) { mouse_ready = true; }
+bool console_is_writing(void) { return cursor_hidden_depth > 0; }
+void console_begin_batch(void) { cursor_guard_enter(); }
+void console_end_batch(void)   { cursor_guard_leave(); }
 
 void
 console_write(const char *s)

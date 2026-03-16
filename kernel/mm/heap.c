@@ -30,9 +30,19 @@ heap_init(void)
     void *base = pmm_alloc_page();
     if (!base) return;
 
+    /* Allocate remaining pages and verify contiguity. */
     for (int i = 1; i < HEAP_PAGES; i++) {
         void *p = pmm_alloc_page();
-        (void)p;
+        void *expected = (uint8_t *)base + (size_t)i * PAGE_SIZE;
+        if (p != expected) {
+            /* Non-contiguous — use only what we have so far. */
+            if (p) pmm_free_page(p);
+            size_t total = (size_t)i * PAGE_SIZE;
+            free_list = (FreeBlock *)base;
+            free_list->size = total;
+            free_list->next = NULL;
+            return;
+        }
     }
 
     size_t total = HEAP_PAGES * PAGE_SIZE;

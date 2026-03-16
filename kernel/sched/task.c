@@ -58,9 +58,17 @@ do_task_create(const char *name, void (*entry)(void), int priority)
     if (task_count >= MAX_TASKS)
         return NULL;
 
-    int slot = task_count++;
+    int slot = task_count;
     Task *t = &tasks[slot];
 
+    /* Allocate a stack before committing the slot. */
+    t->stack_base = (uint8_t *)kmalloc(TASK_STACK_SIZE);
+    if (!t->stack_base) {
+        memset(t, 0, sizeof(Task));
+        return NULL;
+    }
+
+    task_count++;
     t->id    = next_id++;
     t->state = TASK_READY;
     t->name  = name;
@@ -68,11 +76,6 @@ do_task_create(const char *name, void (*entry)(void), int priority)
     t->exit_code = 0;
     t->parent_id = tasks[current_task].id;
     t->wait_for_id = 0;
-
-    /* Allocate a stack. */
-    t->stack_base = (uint8_t *)kmalloc(TASK_STACK_SIZE);
-    if (!t->stack_base)
-        return NULL;
 
     uint64_t stack_top = (uint64_t)(t->stack_base + TASK_STACK_SIZE);
     stack_top &= ~(uint64_t)0xF;
