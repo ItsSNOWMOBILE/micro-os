@@ -6,21 +6,47 @@
 #   make run     — build and launch in QEMU
 #   make clean   — remove build artefacts
 #
-# Requirements (MSYS2 MinGW64):
-#   pacman -S nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-qemu
+# Requirements:
+#   Windows (MSYS2):  pacman -S nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-qemu
+#   Linux (Debian):   apt install nasm gcc-mingw-w64-x86-64 qemu-system-x86 ovmf
+#   macOS (Homebrew): brew install nasm mingw-w64 qemu
+#                     (download OVMF from https://github.com/tianocore/edk2 or
+#                      set OVMF= on the command line)
 #
+
+# ── Platform detection ───────────────────────────────────────────────────────
+
+HOST_OS := $(shell uname -s 2>/dev/null || echo Windows_NT)
 
 # ── Toolchain ────────────────────────────────────────────────────────────────
 
-# Use MSYS2 MinGW64 toolchain.
-MSYS2    = /c/msys64/mingw64/bin
-CC       = $(MSYS2)/gcc
-LD       = $(MSYS2)/ld
-NASM     = /c/msys64/usr/bin/nasm
-OBJCOPY  = $(MSYS2)/objcopy
-QEMU     = $(MSYS2)/qemu-system-x86_64
+ifeq ($(findstring MINGW,$(HOST_OS))$(findstring MSYS,$(HOST_OS)),)
+  # Linux or macOS: use MinGW cross-compiler.
+  CROSS   ?= x86_64-w64-mingw32-
+  CC       = $(CROSS)gcc
+  LD       = $(CROSS)ld
+  NASM     = nasm
+  OBJCOPY  = $(CROSS)objcopy
+  QEMU     = qemu-system-x86_64
 
-export PATH := $(MSYS2):/c/msys64/usr/bin:$(PATH)
+  ifeq ($(HOST_OS),Darwin)
+    OVMF  ?= /opt/homebrew/share/qemu/edk2-x86_64-code.fd
+  else
+    OVMF  ?= /usr/share/OVMF/OVMF_CODE.fd
+  endif
+else
+  # MSYS2 / MinGW64 on Windows.
+  MSYS2    = /c/msys64/mingw64/bin
+  CC       = $(MSYS2)/gcc
+  LD       = $(MSYS2)/ld
+  NASM     = /c/msys64/usr/bin/nasm
+  OBJCOPY  = $(MSYS2)/objcopy
+  QEMU     = $(MSYS2)/qemu-system-x86_64
+
+  export PATH := $(MSYS2):/c/msys64/usr/bin:$(PATH)
+
+  OVMF    ?= /c/msys64/mingw64/share/qemu/edk2-x86_64-code.fd
+endif
 
 # ── Directories ──────────────────────────────────────────────────────────────
 
@@ -28,10 +54,6 @@ BUILD    = build
 BOOT_DIR = boot
 KERN_DIR = kernel
 INT_DIR  = $(KERN_DIR)/interrupts
-
-# ── OVMF firmware path (MSYS2) ──────────────────────────────────────────────
-
-OVMF     = /c/msys64/mingw64/share/qemu/edk2-x86_64-code.fd
 
 # ── Common flags ─────────────────────────────────────────────────────────────
 
@@ -54,6 +76,7 @@ MM_DIR    = $(KERN_DIR)/mm
 DRV_DIR   = $(KERN_DIR)/drivers
 SCHED_DIR = $(KERN_DIR)/sched
 FS_DIR    = $(KERN_DIR)/fs
+HAL_DIR   = $(KERN_DIR)/hal
 
 KERN_C_SRC = $(KERN_DIR)/main.c \
              $(KERN_DIR)/console.c \
@@ -62,6 +85,8 @@ KERN_C_SRC = $(KERN_DIR)/main.c \
              $(KERN_DIR)/sync.c \
              $(KERN_DIR)/syscall.c \
              $(KERN_DIR)/user.c \
+             $(KERN_DIR)/test.c \
+             $(KERN_DIR)/elf.c \
              $(INT_DIR)/gdt.c \
              $(INT_DIR)/idt.c \
              $(MM_DIR)/pmm.c \
@@ -71,7 +96,8 @@ KERN_C_SRC = $(KERN_DIR)/main.c \
              $(DRV_DIR)/keyboard.c \
              $(DRV_DIR)/mouse.c \
              $(SCHED_DIR)/task.c \
-             $(FS_DIR)/vfs.c
+             $(FS_DIR)/vfs.c \
+             $(HAL_DIR)/hal.c
 
 KERN_ASM_SRC = $(KERN_DIR)/entry.asm \
                $(KERN_DIR)/syscall_entry.asm \
@@ -129,6 +155,10 @@ $(BUILD)/kernel/sched/%.o: kernel/sched/%.asm
 	$(NASM) -f win64 $< -o $@
 
 $(BUILD)/kernel/fs/%.o: kernel/fs/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERN_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/hal/%.o: kernel/hal/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(KERN_CFLAGS) -c $< -o $@
 

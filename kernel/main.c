@@ -21,6 +21,10 @@
 #include "sched/task.h"
 #include "sync.h"
 #include "syscall.h"
+#include "user.h"
+#include "test.h"
+#include "elf.h"
+#include "hal/hal.h"
 #include "fs/vfs.h"
 
 static const char *mmap_type_str[] = {
@@ -68,6 +72,58 @@ task_b(void)
     kprintf("[task B] done\n");
 }
 
+/* ── User-mode syscall wrappers (used by Ring 3 demo tasks) ─────────────── */
+
+static inline int64_t
+user_syscall3(uint64_t num, int64_t a0, int64_t a1, int64_t a2)
+{
+    int64_t ret;
+    register int64_t r10 __asm__("r10") = 0;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num), "D"(a0), "S"(a1), "d"(a2), "r"(r10)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+static inline void
+user_write(const char *s, int64_t len)
+{
+    user_syscall3(SYS_WRITE, 1, (int64_t)s, len);
+}
+
+static inline void
+user_sleep(int64_t ticks)
+{
+    user_syscall3(SYS_SLEEP, ticks, 0, 0);
+}
+
+static inline void
+user_exit(int64_t code)
+{
+    user_syscall3(SYS_EXIT, code, 0, 0);
+}
+
+/* Demo user-mode task.  Runs entirely in Ring 3 using INT 0x80 syscalls. */
+static void
+user_demo_task(void)
+{
+    const char msg1[] = "[user] Hello from Ring 3!\n";
+    user_write(msg1, sizeof(msg1) - 1);
+
+    for (int i = 0; i < 3; i++) {
+        const char msg[] = "[user] tick\n";
+        user_write(msg, sizeof(msg) - 1);
+        user_sleep(100);
+    }
+
+    const char done[] = "[user] exiting\n";
+    user_write(done, sizeof(done) - 1);
+    user_exit(0);
+}
+
 /* ── Shell ───────────────────────────────────────────────────────────────── */
 
 static char cwd[256] = "/";
@@ -76,7 +132,8 @@ static const char *shell_commands[] = {
     "help", "mem", "uptime", "clear", "reboot", "ps",
     "ls", "cat", "write", "mkdir", "rm", "touch",
     "cd", "pwd", "echo", "cp", "mv", "stat",
-    "head", "tail", "wc", "whoami", "uname", "rmdir", NULL
+    "head", "tail", "wc", "whoami", "uname", "rmdir",
+    "usertest", "test", "kill", "exec", NULL
 };
 
 /* Safe strncat: appends at most n bytes from src. */
@@ -175,6 +232,10 @@ shell_cmd_help(void)
     kprintf("  ps               list tasks\n");
     kprintf("  whoami           print user\n");
     kprintf("  uname [-a]       system info\n");
+    kprintf("  test             run kernel self-tests\n");
+    kprintf("  usertest         spawn Ring 3 demo task\n");
+    kprintf("  kill <pid> [sig] send signal to task (default SIGTERM)\n");
+    kprintf("  exec <path>      load and run ELF binary\n");
     kprintf("  clear            clear screen\n");
     kprintf("  reboot           reboot machine\n");
 }
@@ -956,6 +1017,53 @@ shell_execute(char *line, int len)
             kprintf("touch: cannot create '%s'\n", path);
         }
 
+    } else if (strcmp(line, "kill") == 0) {
+        kprintf("kill: usage: kill <pid> [signal]\n");
+
+    } else if (strncmp(line, "kill ", 5) == 0) {
+        /* kill <pid> [signal] */
+        const char *arg = &line[5];
+        uint64_t pid = 0;
+        while (*arg >= '0' && *arg <= '9')
+            pid = pid * 10 + (*arg++ - '0');
+        int sig = 15;  /* SIGTERM default */
+        if (*arg == ' ') {
+            arg++;
+            sig = 0;
+            while (*arg >= '0' && *arg <= '9')
+                sig = sig * 10 + (*arg++ - '0');
+        }
+        if (pid == 0) {
+            kprintf("kill: usage: kill <pid> [signal]\n");
+        } else {
+            int rc = sched_send_signal(pid, sig);
+            if (rc == 0)
+                kprintf("Sent signal %d to task %lu\n", sig, pid);
+            else if (rc == -2)
+                kprintf("kill: task %lu is already dead\n", pid);
+            else
+                kprintf("kill: task %lu not found\n", pid);
+        }
+
+    } else if (strncmp(line, "exec ", 5) == 0) {
+        char path[256];
+        resolve_abs(&line[5], path, 256);
+        Task *t = elf_load(path, &line[5]);
+        if (t)
+            kprintf("Loaded ELF task '%s' (id %lu)\n", t->name, t->id);
+        else
+            kprintf("exec: failed to load '%s'\n", path);
+
+    } else if (strcmp(line, "test") == 0) {
+        kernel_run_tests();
+
+    } else if (strcmp(line, "usertest") == 0) {
+        Task *t = user_task_create("user_demo", user_demo_task);
+        if (t)
+            kprintf("Spawned user-mode task (id %lu)\n", t->id);
+        else
+            kprintf("usertest: failed to create user task\n");
+
     } else {
         kprintf("Unknown command: %s\n", line);
     }
@@ -1101,6 +1209,7 @@ kernel_main(BootInfo *info)
 
     /* ── Serial ──────────────────────────────────────────────────────── */
     serial_init();
+    serial_register_hal();
     serial_write("micro-os kernel booting...\n");
 
     /* ── Console ─────────────────────────────────────────────────────── */
@@ -1149,14 +1258,17 @@ kernel_main(BootInfo *info)
 
     /* ── Timer ───────────────────────────────────────────────────────── */
     timer_init(100);
+    timer_register_hal();
     kprintf("[ok] PIT (100 Hz)\n");
 
     /* ── Keyboard ────────────────────────────────────────────────────── */
     keyboard_init();
+    keyboard_register_hal();
     kprintf("[ok] Keyboard\n");
 
     /* ── Mouse ───────────────────────────────────────────────────────── */
     mouse_init();
+    mouse_register_hal();
     kprintf("[ok] Mouse\n");
 
     /* ── VFS ─────────────────────────────────────────────────────────── */

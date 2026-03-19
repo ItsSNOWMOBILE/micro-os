@@ -16,6 +16,8 @@
 #include "../string.h"
 #include "../console.h"
 #include "../drivers/timer.h"
+#include "../interrupts/gdt.h"
+#include "../mm/vmm.h"
 
 static Task  tasks[MAX_TASKS];
 static int   task_count;
@@ -210,6 +212,16 @@ sched_yield(void)
     current_task = next;
     tasks[next].state = TASK_RUNNING;
 
+    /* Update TSS RSP0 so interrupts in Ring 3 switch to the kernel stack. */
+    if (tasks[next].is_user && tasks[next].stack_base)
+        gdt_set_rsp0((uint64_t)tasks[next].stack_base + TASK_STACK_SIZE);
+
+    /* Switch address spaces if the target task has its own PML4. */
+    if (tasks[next].pml4)
+        vmm_switch_address_space(tasks[next].pml4);
+    else if (tasks[prev].pml4)
+        vmm_switch_address_space(vmm_get_kernel_pml4());
+
     context_switch(&tasks[prev].ctx, &tasks[next].ctx);
 
     /* Re-enable interrupts after we've been switched back in. */
@@ -293,4 +305,59 @@ sched_list_tasks(void)
         const char *pr = (t->priority < NUM_PRIORITIES) ? prio_str[t->priority] : "?";
         kprintf("%-4lu %-12s %-10s %-8s\n", t->id, t->name, st, pr);
     }
+}
+
+Task *
+sched_find_task(uint64_t id)
+{
+    for (int i = 0; i < task_count; i++) {
+        if (tasks[i].id == id)
+            return &tasks[i];
+    }
+    return NULL;
+}
+
+int
+sched_send_signal(uint64_t task_id, int sig)
+{
+    if (sig < 1 || sig >= SIG_MAX_TASK) return -1;
+
+    Task *t = sched_find_task(task_id);
+    if (!t) return -1;
+    if (t->state == TASK_DEAD) return -2;
+
+    /* SIGKILL and SIGSTOP cannot be caught or ignored. */
+    if (sig == 9) {  /* SIGKILL */
+        t->exit_code = 128 + sig;
+        t->state = TASK_DEAD;
+        return 0;
+    }
+
+    if (sig == 19) {  /* SIGSTOP */
+        t->state = TASK_BLOCKED;
+        return 0;
+    }
+
+    /* Check if the signal is ignored. */
+    if (t->sig_handlers[sig] == 1)  /* SIG_IGN */
+        return 0;
+
+    /* Default action for most signals is to terminate. */
+    if (t->sig_handlers[sig] == 0) {  /* SIG_DFL */
+        /* SIGCHLD default is ignore. */
+        if (sig == 17) return 0;
+        /* All others: terminate. */
+        t->exit_code = 128 + sig;
+        t->state = TASK_DEAD;
+        return 0;
+    }
+
+    /* Custom handler: mark signal as pending. Delivery happens
+     * when the task next returns to user mode. */
+    t->sig_pending |= (1u << sig);
+    /* If blocked/sleeping, wake it up so it can handle the signal. */
+    if (t->state == TASK_SLEEPING || t->state == TASK_BLOCKED)
+        t->state = TASK_READY;
+
+    return 0;
 }

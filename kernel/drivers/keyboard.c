@@ -11,6 +11,7 @@
 #include "keyboard.h"
 #include "../kernel.h"
 #include "../interrupts/idt.h"
+#include "../hal/hal.h"
 
 #define KBD_DATA_PORT   0x60
 #define KBD_STATUS_PORT 0x64
@@ -279,3 +280,17 @@ keyboard_flush(void)
 bool keyboard_ctrl_held(void)  { return ctrl_held; }
 bool keyboard_alt_held(void)   { return alt_held; }
 bool keyboard_shift_held(void) { return shift_held; }
+
+/* ── HAL registration ───────────────────────────────────────────────────── */
+
+static const HalInputOps ps2_keyboard_ops = {
+    .init       = keyboard_init,
+    .has_key    = keyboard_has_key,
+    .getchar    = keyboard_getchar,
+    .flush      = keyboard_flush,
+    .ctrl_held  = keyboard_ctrl_held,
+    .alt_held   = keyboard_alt_held,
+    .shift_held = keyboard_shift_held,
+};
+
+void keyboard_register_hal(void) { hal_input_register(&ps2_keyboard_ops); }

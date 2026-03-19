@@ -14,4 +14,7 @@ void     timer_init(uint32_t frequency_hz);
 void     timer_enable_preemption(void);
 uint64_t timer_ticks(void);
 
+/* Register the PIT with the HAL. */
+void timer_register_hal(void);
+
 #endif /* TIMER_H */

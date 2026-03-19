@@ -8,6 +8,10 @@ A 64-bit operating system kernel written from scratch in C and x86-64 assembly. 
 - **UEFI bootloader** — initialises GOP framebuffer, reads memory map, loads kernel to 0x100000
 - **GDT/IDT** — 64-bit descriptor tables, 256 interrupt vectors, IST-based stack switching
 - **PIC** — IRQ 0-15 remapped to vectors 32-47
+- **Exception handling** — dedicated handlers for all CPU faults (page fault, GPF, divide-by-zero, invalid opcode, stack fault, etc.) with register dumps; user-mode faults kill the offending task instead of panicking
+- **System calls** — INT 0x80 dispatcher with 14 syscalls: exit, read, write, open, close, stat, yield, sleep, getpid, getppid, waitpid, kill, sigreturn
+- **Hardware abstraction layer** — ops-struct interfaces for input, pointer, timer, and serial devices; drivers register at init, kernel calls through the HAL
+- **ELF loader** — parses ELF64 executables from the VFS, maps PT_LOAD segments into per-process address spaces
 
 ### Memory management
 - **Physical memory manager** — bitmap allocator with bulk 64-bit operations, initialised from the UEFI memory map
@@ -24,6 +28,9 @@ A 64-bit operating system kernel written from scratch in C and x86-64 assembly. 
 - **Preemptive multitasking** — priority-based round-robin with 4 priority levels
 - **Task lifecycle** — create, sleep, wait, exit, cleanup
 - **Context switching** — callee-saved register save/restore via assembly
+- **User-mode tasks** — Ring 3 tasks with separate user stacks, IRETQ entry, and INT 0x80 syscalls; TSS RSP0 updated on context switch for proper privilege transitions
+- **Per-process address spaces** — each user task gets its own PML4, CR3 switched on context switch; kernel mappings shared, user pages isolated
+- **Signals** — POSIX-style signal infrastructure with pending bitmask, per-task handler table, SIGKILL/SIGSTOP special handling
 
 ### Filesystem
 - **In-memory VFS (ramfs)** — tree-structured vnode table with directories, files up to 16 KiB
@@ -56,6 +63,10 @@ Interactive shell with bash-style line editing and tab completion:
 | `whoami` | Print current user |
 | `uname [-a]` | Print system information |
 | `clear` | Clear the screen |
+| `test` | Run kernel self-tests |
+| `usertest` | Spawn a Ring 3 demo task |
+| `kill <id>` | Send SIGKILL to a task |
+| `exec <path>` | Load and run an ELF binary from the VFS |
 | `reboot` | Reboot the machine |
 
 **Line editing:** left/right arrows, Home, End, Delete, backspace, Ctrl+L (clear screen).
@@ -64,21 +75,30 @@ Interactive shell with bash-style line editing and tab completion:
 
 ## TODO
 
-- Add userspace, privilege separation, user-mode tasks
-- Error handling and fault recovery
-- Hardware abstraction layer
-- Cross-compilation support (Linux/macOS host)
-- Tests
+- PCI bus enumeration
+- USB host controller driver (xHCI)
+- Networking stack (virtio-net or e1000)
+- On-disk filesystem (FAT32 or ext2)
 
 ## Building
 
 ### Requirements
 
-- [MSYS2](https://www.msys2.org/) with the MinGW64 toolchain
-- Python 3 (for disk image generation)
+The build system auto-detects the host platform.
 
+**Windows (MSYS2 MinGW64):**
 ```
 pacman -S nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-qemu python3
+```
+
+**Linux (Debian/Ubuntu):**
+```
+apt install nasm gcc-mingw-w64-x86-64 qemu-system-x86 ovmf python3
+```
+
+**macOS (Homebrew):**
+```
+brew install nasm mingw-w64 qemu python3
 ```
 
 ### Build and run
@@ -105,8 +125,12 @@ kernel/
   string.c/h           Freestanding string/memory utilities
   kernel.h             Port I/O, cli/sti/hlt macros
   sync.c/h             Spinlock primitives
-  syscall.c/h          System call infrastructure
-  user.c/h             User-mode support (planned)
+  syscall.c/h          System call dispatcher (INT 0x80)
+  syscall_entry.asm    SYSCALL instruction entry point
+  user.c/h             User-mode task creation (Ring 3 via IRETQ)
+  user_entry.asm       IRETQ trampoline to enter user mode
+  elf.c/h              ELF64 binary loader
+  test.c/h             Kernel self-test framework
 
   interrupts/
     gdt.c/h            Global Descriptor Table + TSS
@@ -131,6 +155,9 @@ kernel/
   fs/
     vfs.c/h            In-memory virtual filesystem (ramfs)
 
+  hal/
+    hal.c/h            Hardware abstraction layer (ops-struct interfaces)
+
 tools/
   mkimg.py             Creates a bootable FAT12 UEFI disk image
 ```
@@ -154,6 +181,7 @@ tools/
 | PMM bitmap | After kernel | Physical page frame bitmap |
 | Heap | PMM-allocated pages | Dynamic kernel allocations |
 | Framebuffer | `0x80000000` (typical) | GOP linear framebuffer |
+| User stacks | `0x7FFFFFFFE000` ↓ | Per-task Ring 3 stacks (16 KiB each) |
 
 ## License
 

@@ -53,4 +53,7 @@ bool keyboard_shift_held(void);
 /* Discard any buffered keystrokes. */
 void keyboard_flush(void);
 
+/* Register the PS/2 keyboard with the HAL. */
+void keyboard_register_hal(void);
+
 #endif /* KEYBOARD_H */

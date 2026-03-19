@@ -27,4 +27,7 @@ void mouse_show_cursor(void);
 int32_t mouse_x(void);
 int32_t mouse_y(void);
 
+/* Register the PS/2 mouse with the HAL. */
+void mouse_register_hal(void);
+
 #endif /* MOUSE_H */

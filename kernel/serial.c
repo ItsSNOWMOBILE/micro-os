@@ -8,6 +8,7 @@
 
 #include "serial.h"
 #include "kernel.h"
+#include "hal/hal.h"
 
 #define COM1 0x3F8
 
@@ -49,3 +50,13 @@ serial_write(const char *s)
         outb(COM1, (uint8_t)*s++);
     }
 }
+
+/* ── HAL registration ───────────────────────────────────────────────────── */
+
+static const HalSerialOps com1_serial_ops = {
+    .init    = serial_init,
+    .putchar = serial_putchar,
+    .write   = serial_write,
+};
+
+void serial_register_hal(void) { hal_serial_register(&com1_serial_ops); }

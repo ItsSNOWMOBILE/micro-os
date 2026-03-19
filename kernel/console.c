@@ -210,36 +210,48 @@ console_write(const char *s)
 
 /* ── kprintf ─────────────────────────────────────────────────────────────── */
 
-static void
-print_uint(uint64_t val, int base)
+static int
+uint_to_buf(char *buf, uint64_t val, int base)
 {
-    char buf[20];
-    int  i = 0;
-
+    int i = 0;
     if (val == 0) {
-        console_putchar('0');
-        return;
+        buf[i++] = '0';
+        return i;
     }
-
+    char tmp[20];
+    int t = 0;
     while (val > 0) {
         uint64_t digit = val % base;
-        buf[i++] = digit < 10 ? '0' + digit : 'a' + digit - 10;
+        tmp[t++] = digit < 10 ? '0' + digit : 'a' + digit - 10;
         val /= base;
     }
+    while (--t >= 0)
+        buf[i++] = tmp[t];
+    return i;
+}
 
-    while (--i >= 0)
-        console_putchar(buf[i]);
+static int
+int_to_buf(char *buf, int64_t val)
+{
+    int i = 0;
+    if (val < 0) {
+        buf[i++] = '-';
+        i += uint_to_buf(buf + i, (uint64_t)(-val), 10);
+    } else {
+        i += uint_to_buf(buf + i, (uint64_t)val, 10);
+    }
+    return i;
 }
 
 static void
-print_int(int64_t val)
+emit_padded(const char *s, int slen, int width, int left_align)
 {
-    if (val < 0) {
-        console_putchar('-');
-        print_uint((uint64_t)(-val), 10);
-    } else {
-        print_uint((uint64_t)val, 10);
-    }
+    int pad = (width > slen) ? width - slen : 0;
+    if (!left_align)
+        for (int i = 0; i < pad; i++) console_putchar(' ');
+    for (int i = 0; i < slen; i++) console_putchar(s[i]);
+    if (left_align)
+        for (int i = 0; i < pad; i++) console_putchar(' ');
 }
 
 void
@@ -255,6 +267,18 @@ kprintf(const char *fmt, ...)
         }
         fmt++;  /* skip '%' */
 
+        /* Flags. */
+        int left_align = 0;
+        if (*fmt == '-') {
+            left_align = 1;
+            fmt++;
+        }
+
+        /* Width. */
+        int width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+
         /* Handle 'l' length modifier. */
         int is_long = 0;
         if (*fmt == 'l') {
@@ -262,34 +286,45 @@ kprintf(const char *fmt, ...)
             fmt++;
         }
 
+        char buf[24];
+        int len;
+
         switch (*fmt) {
         case 's': {
             const char *s = va_arg(ap, const char *);
-            console_write(s ? s : "(null)");
+            if (!s) s = "(null)";
+            len = 0;
+            while (s[len]) len++;
+            emit_padded(s, len, width, left_align);
             break;
         }
         case 'd': {
             int64_t val = is_long ? va_arg(ap, int64_t) : va_arg(ap, int);
-            print_int(val);
+            len = int_to_buf(buf, val);
+            emit_padded(buf, len, width, left_align);
             break;
         }
         case 'u': {
             uint64_t val = is_long ? va_arg(ap, uint64_t) : va_arg(ap, unsigned int);
-            print_uint(val, 10);
+            len = uint_to_buf(buf, val, 10);
+            emit_padded(buf, len, width, left_align);
             break;
         }
         case 'x': {
             uint64_t val = is_long ? va_arg(ap, uint64_t) : va_arg(ap, unsigned int);
-            print_uint(val, 16);
+            len = uint_to_buf(buf, val, 16);
+            emit_padded(buf, len, width, left_align);
             break;
         }
         case 'p': {
-            console_write("0x");
-            print_uint(va_arg(ap, uint64_t), 16);
+            buf[0] = '0'; buf[1] = 'x';
+            len = 2 + uint_to_buf(buf + 2, va_arg(ap, uint64_t), 16);
+            emit_padded(buf, len, width, left_align);
             break;
         }
         case 'c':
-            console_putchar((char)va_arg(ap, int));
+            buf[0] = (char)va_arg(ap, int);
+            emit_padded(buf, 1, width, left_align);
             break;
         case '%':
             console_putchar('%');

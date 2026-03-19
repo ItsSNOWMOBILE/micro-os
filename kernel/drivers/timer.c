@@ -11,6 +11,7 @@
 #include "../kernel.h"
 #include "../interrupts/idt.h"
 #include "../sched/task.h"
+#include "../hal/hal.h"
 #include <stdbool.h>
 
 #define PIT_CHANNEL0 0x40
@@ -69,3 +70,13 @@ timer_ticks(void)
 {
     return g_ticks;
 }
+
+/* ── HAL registration ───────────────────────────────────────────────────── */
+
+static const HalTimerOps pit_timer_ops = {
+    .init              = timer_init,
+    .enable_preemption = timer_enable_preemption,
+    .ticks             = timer_ticks,
+};
+
+void timer_register_hal(void) { hal_timer_register(&pit_timer_ops); }

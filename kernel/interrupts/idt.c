@@ -197,33 +197,122 @@ division_handler(InterruptFrame *frame)
 static void
 breakpoint_handler(InterruptFrame *frame)
 {
-    serial_write("\n*** BREAKPOINT ***\n");
-    /* Print RIP in hex to serial. */
-    serial_write("  RIP = 0x");
-    uint64_t rip = frame->rip;
-    char hex[17];
-    for (int i = 15; i >= 0; i--) {
-        int digit = rip & 0xF;
-        hex[i] = digit < 10 ? '0' + digit : 'a' + digit - 10;
-        rip >>= 4;
-    }
-    hex[16] = '\0';
-    serial_write(hex);
-    serial_write("\n");
-
-    serial_write("  RSP = 0x");
-    uint64_t rsp = frame->rsp;
-    for (int i = 15; i >= 0; i--) {
-        int digit = rsp & 0xF;
-        hex[i] = digit < 10 ? '0' + digit : 'a' + digit - 10;
-        rsp >>= 4;
-    }
-    serial_write(hex);
-    serial_write("\n");
-
     kprintf("\n*** BREAKPOINT ***\n");
     dump_registers(frame);
-    panic("breakpoint exception");
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    /* Kernel breakpoints: log and continue (useful for debugging). */
+    serial_write("*** BREAKPOINT (kernel, continuing) ***\n");
+}
+
+static void
+overflow_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** OVERFLOW ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("overflow exception");
+}
+
+static void
+bound_range_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** BOUND RANGE EXCEEDED ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("bound range exceeded");
+}
+
+static void
+invalid_tss_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** INVALID TSS ***\n");
+    dump_registers(frame);
+    panic("invalid TSS");
+}
+
+static void
+segment_np_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** SEGMENT NOT PRESENT ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("segment not present");
+}
+
+static void
+stack_fault_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** STACK-SEGMENT FAULT ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("stack-segment fault");
+}
+
+static void
+alignment_check_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** ALIGNMENT CHECK ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("alignment check");
+}
+
+static void
+simd_handler(InterruptFrame *frame)
+{
+    kprintf("\n*** SIMD FLOATING-POINT EXCEPTION ***\n");
+    dump_registers(frame);
+
+    if (frame->cs & 3) {
+        kprintf("  Killing task: %s\n", sched_current()->name);
+        sched_current()->state = TASK_DEAD;
+        sched_yield();
+        return;
+    }
+
+    panic("SIMD floating-point exception");
 }
 
 /* ── Dispatch ────────────────────────────────────────────────────────────── */
@@ -239,16 +328,18 @@ isr_dispatch(InterruptFrame *frame)
     }
 
     if (vector < 32) {
-        serial_write("\n*** EXCEPTION ");
-        /* Quick decimal print for serial. */
-        if (vector >= 10) serial_putchar('0' + vector / 10);
-        serial_putchar('0' + vector % 10);
-        serial_write(": ");
-        serial_write(exception_names[vector]);
-        serial_write(" ***\n");
         kprintf("\n*** EXCEPTION %u: %s ***\n", (unsigned)vector,
                 exception_names[vector]);
         dump_registers(frame);
+
+        /* User-mode faults: kill the offending task. */
+        if (frame->cs & 3) {
+            kprintf("  Killing task: %s\n", sched_current()->name);
+            sched_current()->state = TASK_DEAD;
+            sched_yield();
+            return;
+        }
+
         panic("unhandled exception");
     }
 
@@ -288,10 +379,17 @@ idt_init(void)
     /* Register built-in exception handlers. */
     handlers[0]  = division_handler;
     handlers[3]  = breakpoint_handler;
+    handlers[4]  = overflow_handler;
+    handlers[5]  = bound_range_handler;
     handlers[6]  = invalid_opcode_handler;
     handlers[8]  = double_fault_handler;
+    handlers[10] = invalid_tss_handler;
+    handlers[11] = segment_np_handler;
+    handlers[12] = stack_fault_handler;
     handlers[13] = gpf_handler;
     handlers[14] = page_fault_handler;
+    handlers[17] = alignment_check_handler;
+    handlers[19] = simd_handler;
 
     IDTR idtr = {
         .limit = sizeof(idt) - 1,

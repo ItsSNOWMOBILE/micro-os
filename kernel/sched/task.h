@@ -41,6 +41,8 @@ typedef struct {
     uint64_t rflags;
 } TaskContext;
 
+#define SIG_MAX_TASK 20
+
 typedef struct Task {
     TaskContext ctx;
     uint64_t   id;
@@ -52,6 +54,14 @@ typedef struct Task {
     int        exit_code;
     uint64_t   parent_id;      /* ID of parent task */
     uint64_t   wait_for_id;    /* task ID we're waiting on (0 = none) */
+    bool       is_user;        /* true if this is a Ring 3 task */
+
+    /* Signal state. */
+    uint32_t   sig_pending;    /* bitmask of pending signals */
+    uint64_t   sig_handlers[SIG_MAX_TASK]; /* 0=SIG_DFL, 1=SIG_IGN, else handler addr */
+
+    /* Per-process address space. NULL = use kernel page tables. */
+    uint64_t  *pml4;           /* task's own PML4 (physical address) */
 } Task;
 
 void  sched_init(void);
@@ -73,6 +83,12 @@ bool  sched_any_priority(int priority);
 
 /* Print task list (for ps command). */
 void  sched_list_tasks(void);
+
+/* Find a task by ID. Returns NULL if not found. */
+Task *sched_find_task(uint64_t id);
+
+/* Send a signal to a task. Returns 0 on success, -1 if not found. */
+int   sched_send_signal(uint64_t task_id, int sig);
 
 /* Assembly context switch. */
 extern void context_switch(TaskContext *old_ctx, TaskContext *new_ctx);

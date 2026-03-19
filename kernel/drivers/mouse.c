@@ -13,6 +13,7 @@
 #include "mouse.h"
 #include "../kernel.h"
 #include "../interrupts/idt.h"
+#include "../hal/hal.h"
 #include "../console.h"
 
 #define MOUSE_DATA_PORT   0x60
@@ -306,3 +307,28 @@ mouse_show_cursor(void)
     if (!cursor_visible)
         draw_cursor(mouse_px, mouse_py);
 }
+
+/* ── HAL registration ───────────────────────────────────────────────────── */
+
+static void
+mouse_hal_get_state(HalPointerState *out)
+{
+    out->x      = mouse_px;
+    out->y      = mouse_py;
+    out->left   = btn_left;
+    out->right  = btn_right;
+    out->middle = btn_middle;
+    out->dx     = last_dx;
+    out->dy     = last_dy;
+}
+
+static const HalPointerOps ps2_mouse_ops = {
+    .init        = mouse_init,
+    .get_state   = mouse_hal_get_state,
+    .hide_cursor = mouse_hide_cursor,
+    .show_cursor = mouse_show_cursor,
+    .cursor_x    = mouse_x,
+    .cursor_y    = mouse_y,
+};
+
+void mouse_register_hal(void) { hal_pointer_register(&ps2_mouse_ops); }
