@@ -18,6 +18,9 @@
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "drivers/mouse.h"
+#include "drivers/pci.h"
+#include "drivers/ata.h"
+#include "fs/fat32.h"
 #include "sched/task.h"
 #include "sync.h"
 #include "syscall.h"
@@ -26,6 +29,9 @@
 #include "elf.h"
 #include "hal/hal.h"
 #include "fs/vfs.h"
+#include "drivers/virtio_net.h"
+#include "drivers/xhci.h"
+#include "net/net.h"
 
 static const char *mmap_type_str[] = {
     [MMAP_USABLE]                  = "usable",
@@ -48,28 +54,6 @@ panic(const char *msg)
     cli();
     for (;;)
         hlt();
-}
-
-/* ── Demo tasks ──────────────────────────────────────────────────────────── */
-
-static void
-task_a(void)
-{
-    for (int i = 0; i < 5; i++) {
-        kprintf("[task A] iteration %d\n", i);
-        sched_sleep(100);
-    }
-    kprintf("[task A] done\n");
-}
-
-static void
-task_b(void)
-{
-    for (int i = 0; i < 5; i++) {
-        kprintf("[task B] iteration %d\n", i);
-        sched_sleep(150);
-    }
-    kprintf("[task B] done\n");
 }
 
 /* ── User-mode syscall wrappers (used by Ring 3 demo tasks) ─────────────── */
@@ -133,7 +117,8 @@ static const char *shell_commands[] = {
     "ls", "cat", "write", "mkdir", "rm", "touch",
     "cd", "pwd", "echo", "cp", "mv", "stat",
     "head", "tail", "wc", "whoami", "uname", "rmdir",
-    "usertest", "test", "kill", "exec", NULL
+    "usertest", "test", "kill", "exec", "lspci", "fat32",
+    "ping", "net", "lsusb", NULL
 };
 
 /* Safe strncat: appends at most n bytes from src. */
@@ -236,6 +221,12 @@ shell_cmd_help(void)
     kprintf("  usertest         spawn Ring 3 demo task\n");
     kprintf("  kill <pid> [sig] send signal to task (default SIGTERM)\n");
     kprintf("  exec <path>      load and run ELF binary\n");
+    kprintf("  lspci            list PCI devices\n");
+    kprintf("  fat32 ls [path]  list FAT32 directory\n");
+    kprintf("  fat32 cat <path> read FAT32 file\n");
+    kprintf("  ping <ip>        send ICMP echo request\n");
+    kprintf("  net              show network status\n");
+    kprintf("  lsusb            list USB devices\n");
     kprintf("  clear            clear screen\n");
     kprintf("  reboot           reboot machine\n");
 }
@@ -870,6 +861,54 @@ strip_trailing(char *s)
     s[n] = '\0';
 }
 
+/* ── FAT32 shell helpers ────────────────────────────────────────────────── */
+
+static void
+fat32_ls_cb(const Fat32DirEntry *entry, void *ctx)
+{
+    (void)ctx;
+    if (entry->type == FAT32_TYPE_DIR)
+        kprintf("  %-30s <DIR>\n", entry->name);
+    else
+        kprintf("  %-30s %lu\n", entry->name, (uint64_t)entry->size);
+}
+
+static void
+fat32_ls(const char *path)
+{
+    if (fat32_readdir(path, fat32_ls_cb, NULL) < 0)
+        kprintf("fat32 ls: '%s': not found or not a directory\n", path);
+}
+
+static void
+fat32_shell_cat(const char *path)
+{
+    /* First stat to get size. */
+    Fat32DirEntry st;
+    if (fat32_stat(path, &st) < 0) {
+        kprintf("fat32 cat: '%s': not found\n", path);
+        return;
+    }
+    if (st.type == FAT32_TYPE_DIR) {
+        kprintf("fat32 cat: '%s': is a directory\n", path);
+        return;
+    }
+    uint32_t size = st.size;
+    if (size > 16384) size = 16384;  /* cap display */
+
+    char *buf = kmalloc(size + 1);
+    if (!buf) { kprintf("fat32 cat: out of memory\n"); return; }
+
+    int nread = fat32_read_file(path, buf, size);
+    if (nread < 0) {
+        kprintf("fat32 cat: read error\n");
+    } else {
+        buf[nread] = '\0';
+        kprintf("%s", buf);
+    }
+    kfree(buf);
+}
+
 static void
 shell_execute(char *line, int len)
 {
@@ -1064,6 +1103,66 @@ shell_execute(char *line, int len)
         else
             kprintf("usertest: failed to create user task\n");
 
+    } else if (strcmp(line, "lspci") == 0) {
+        pci_list_devices();
+
+    } else if (strcmp(line, "lsusb") == 0) {
+        xhci_list_devices();
+
+    } else if (strcmp(line, "net") == 0) {
+        net_status();
+
+    } else if (strncmp(line, "ping ", 5) == 0) {
+        /* Parse dotted-decimal IP. */
+        const char *arg = &line[5];
+        uint8_t ip[4] = {0,0,0,0};
+        int octet = 0;
+        while (*arg && octet < 4) {
+            uint8_t val = 0;
+            while (*arg >= '0' && *arg <= '9')
+                val = val * 10 + (uint8_t)(*arg++ - '0');
+            ip[octet++] = val;
+            if (*arg == '.') arg++;
+        }
+        if (octet != 4) {
+            kprintf("ping: invalid IP address\n");
+        } else {
+            kprintf("PING %d.%d.%d.%d ...\n",
+                    ip[0], ip[1], ip[2], ip[3]);
+            if (net_ping(ip) < 0) {
+                kprintf("ping: send failed (ARP timeout?)\n");
+            } else {
+                int lat = net_ping_check();
+                if (lat >= 0)
+                    kprintf("Reply from %d.%d.%d.%d: time=%d ticks (%d ms)\n",
+                            ip[0], ip[1], ip[2], ip[3], lat, lat * 10);
+                else
+                    kprintf("Request timed out.\n");
+            }
+        }
+
+    } else if (strcmp(line, "ping") == 0) {
+        kprintf("ping: usage: ping <ip>\n");
+
+    } else if (strncmp(line, "fat32", 5) == 0 &&
+               (line[5] == '\0' || line[5] == ' ')) {
+        if (!fat32_mounted()) {
+            kprintf("fat32: no FAT32 volume mounted\n");
+        } else if (line[5] == '\0') {
+            kprintf("fat32: subcommands: ls [path], cat <path>\n");
+        } else {
+            const char *sub = &line[6];
+            if (strncmp(sub, "ls", 2) == 0 &&
+                (sub[2] == '\0' || sub[2] == ' ')) {
+                const char *path = (sub[2] == ' ') ? &sub[3] : "/";
+                fat32_ls(path);
+            } else if (strncmp(sub, "cat ", 4) == 0) {
+                fat32_shell_cat(&sub[4]);
+            } else {
+                kprintf("fat32: unknown subcommand\n");
+            }
+        }
+
     } else {
         kprintf("Unknown command: %s\n", line);
     }
@@ -1074,10 +1173,6 @@ shell_execute(char *line, int len)
 static void
 shell_task(void)
 {
-    /* Wait for demo tasks to finish, then present a clean shell. */
-    sched_sleep(50);  /* brief yield to let tasks start */
-    while (sched_any_priority(PRIORITY_LOW))
-        sched_sleep(10);
     console_clear();
     keyboard_flush();  /* discard any stray scancodes from boot */
     kprintf("micro-os 0.2 — type 'help' for commands\n");
@@ -1271,6 +1366,13 @@ kernel_main(BootInfo *info)
     mouse_register_hal();
     kprintf("[ok] Mouse\n");
 
+    /* ── PCI ─────────────────────────────────────────────────────────── */
+    pci_init();
+
+    /* ── ATA ─────────────────────────────────────────────────────────── */
+    if (pci_find_device(PCI_CLASS_STORAGE, 0x01))
+        ata_init();
+
     /* ── VFS ─────────────────────────────────────────────────────────── */
     vfs_init();
     kprintf("[ok] VFS (ramfs)\n");
@@ -1287,16 +1389,27 @@ kernel_main(BootInfo *info)
         vfs_mkdir("/tmp");
     }
 
+    /* ── FAT32 ───────────────────────────────────────────────────────── */
+    if (ata_drive_present(1))
+        fat32_init(1);
+
+    /* ── Networking ──────────────────────────────────────────────────── */
+    if (virtio_net_init() == 0) {
+        uint8_t ip[4] = {10, 0, 2, 15};  /* QEMU user-net default subnet */
+        net_init(ip);
+    }
+
+    /* ── USB (xHCI) ──────────────────────────────────────────────────── */
+    xhci_init();
+
     /* ── Syscalls ────────────────────────────────────────────────────── */
     syscall_init();
     kprintf("[ok] Syscalls\n");
 
     /* ── Scheduler ───────────────────────────────────────────────────── */
     sched_init();
-    task_create_prio("task_a", task_a, PRIORITY_LOW);
-    task_create_prio("task_b", task_b, PRIORITY_LOW);
     task_create_prio("shell",  shell_task, PRIORITY_HIGH);
-    kprintf("[ok] Scheduler (3 tasks, preemptive)\n");
+    kprintf("[ok] Scheduler (preemptive)\n");
 
     kprintf("\nBoot complete.\n");
     serial_write("Boot complete.\n");

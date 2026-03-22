@@ -197,18 +197,19 @@ division_handler(InterruptFrame *frame)
 static void
 breakpoint_handler(InterruptFrame *frame)
 {
-    kprintf("\n*** BREAKPOINT ***\n");
-    dump_registers(frame);
-
     if (frame->cs & 3) {
+        /* User-mode breakpoint: dump and kill task. */
+        kprintf("\n*** BREAKPOINT ***\n");
+        dump_registers(frame);
         kprintf("  Killing task: %s\n", sched_current()->name);
         sched_current()->state = TASK_DEAD;
         sched_yield();
         return;
     }
 
-    /* Kernel breakpoints: log and continue (useful for debugging). */
-    serial_write("*** BREAKPOINT (kernel, continuing) ***\n");
+    /* Kernel breakpoints: silently continue.  PCI config-space probes
+     * on some UEFI firmware trigger INT 3 in firmware code; these are
+     * harmless and must not flood the console. */
 }
 
 static void

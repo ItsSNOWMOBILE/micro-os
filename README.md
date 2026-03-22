@@ -15,14 +15,23 @@ A 64-bit operating system kernel written from scratch in C and x86-64 assembly. 
 
 ### Memory management
 - **Physical memory manager** — bitmap allocator with bulk 64-bit operations, initialised from the UEFI memory map
-- **Virtual memory manager** — 4-level paging with 4 GiB identity map via 2 MiB huge pages
-- **Kernel heap** — first-fit free-list allocator (`kmalloc`/`kfree`)
+- **Virtual memory manager** — 4-level paging with 4 GiB identity map via 2 MiB huge pages; dynamic MMIO mapping for devices above 4 GiB
+- **Kernel heap** — first-fit free-list allocator (`kmalloc`/`kfree`/`kmalloc_aligned`), auto-grows from PMM
 
 ### Drivers
 - **PIT timer** — 100 Hz tick, monotonic counter, preemptive scheduling trigger
 - **PS/2 keyboard** — scan code set 1, full US layout, ring buffer, Shift/Caps/Ctrl/Alt
 - **PS/2 mouse** — IRQ 12 movement and button tracking
 - **Serial** — COM1 at 115200 baud for debug logging
+- **PCI bus** — full enumeration (256 buses x 32 devices x 8 functions), config space access, multi-function and bridge traversal
+- **ATA PIO** — primary channel disk access with drive detection and 28-bit LBA reads
+- **Virtio-net** — legacy PCI transport, split virtqueues (RX/TX), polling mode
+- **USB xHCI** — host controller init, port reset, device slot/address assignment, GET_DESCRIPTOR enumeration
+
+### Networking
+- **Ethernet/ARP/IPv4/ICMP** — minimal network stack over virtio-net
+- **ARP** — request/reply handling with 16-entry cache, blocking resolution with retries
+- **ICMP** — echo request/reply (ping) with latency measurement
 
 ### Scheduling
 - **Preemptive multitasking** — priority-based round-robin with 4 priority levels
@@ -34,6 +43,7 @@ A 64-bit operating system kernel written from scratch in C and x86-64 assembly. 
 
 ### Filesystem
 - **In-memory VFS (ramfs)** — tree-structured vnode table with directories, files up to 16 KiB
+- **FAT32 reader** — BPB parsing, FAT chain traversal, long filename (LFN) support, directory listing, file read, case-insensitive path resolution
 - **Operations** — open, read, write, close, stat, mkdir, readdir, unlink, rename
 
 ### Shell
@@ -65,20 +75,19 @@ Interactive shell with bash-style line editing and tab completion:
 | `clear` | Clear the screen |
 | `test` | Run kernel self-tests |
 | `usertest` | Spawn a Ring 3 demo task |
-| `kill <id>` | Send SIGKILL to a task |
+| `kill <id>` | Send signal to a task |
 | `exec <path>` | Load and run an ELF binary from the VFS |
+| `lspci` | List PCI devices |
+| `lsusb` | List USB devices |
+| `fat32 ls [path]` | List FAT32 directory |
+| `fat32 cat <path>` | Read FAT32 file |
+| `ping <ip>` | Send ICMP echo request |
+| `net` | Show network status and ARP cache |
 | `reboot` | Reboot the machine |
 
 **Line editing:** left/right arrows, Home, End, Delete, backspace, Ctrl+L (clear screen).
 
 **Tab completion:** single match completes fully; multiple matches complete the common prefix on first Tab, list all on second Tab. Works for both commands and file paths relative to the current directory.
-
-## TODO
-
-- PCI bus enumeration
-- USB host controller driver (xHCI)
-- Networking stack (virtio-net or e1000)
-- On-disk filesystem (FAT32 or ext2)
 
 ## Building
 
@@ -147,6 +156,10 @@ kernel/
     timer.c/h          PIT channel 0 (100 Hz)
     keyboard.c/h       PS/2 keyboard (scan code set 1, US layout)
     mouse.c/h          PS/2 mouse (IRQ 12)
+    pci.c/h            PCI bus enumeration and config space access
+    ata.c/h            ATA PIO disk driver
+    virtio_net.c/h     Virtio network device (legacy PCI transport)
+    xhci.c/h           USB xHCI host controller
 
   sched/
     task.c/h           Task management, priority scheduler
@@ -154,12 +167,17 @@ kernel/
 
   fs/
     vfs.c/h            In-memory virtual filesystem (ramfs)
+    fat32.c/h          FAT32 reader (LFN support)
+
+  net/
+    net.c/h            Network stack (Ethernet, ARP, IPv4, ICMP)
 
   hal/
     hal.c/h            Hardware abstraction layer (ops-struct interfaces)
 
 tools/
   mkimg.py             Creates a bootable FAT12 UEFI disk image
+  mkfat32.py           Creates a FAT32 test disk image with sample files
 ```
 
 ## Boot sequence
@@ -168,8 +186,8 @@ tools/
 2. Bootloader initialises GOP, reads memory map, copies kernel to `0x100000`
 3. Bootloader calls `ExitBootServices` and jumps to `_start`
 4. `_start` zeroes BSS, calls `kernel_main`
-5. Kernel initialises: serial, console, GDT, IDT, PMM, VMM, heap, PIT, keyboard, mouse, VFS, syscalls, scheduler
-6. Scheduler launches demo tasks and the interactive shell
+5. Kernel initialises: serial, console, GDT, IDT, PMM, VMM, heap, PIT, keyboard, mouse, PCI, ATA, VFS, FAT32, virtio-net, network stack, xHCI, syscalls, scheduler
+6. Scheduler launches the interactive shell
 7. Idle loop yields to the scheduler indefinitely
 
 ## Memory layout

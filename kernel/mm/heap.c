@@ -65,39 +65,72 @@ kmalloc(size_t size)
     if (needed < MIN_BLOCK)
         needed = MIN_BLOCK;
 
-    FreeBlock **prev = &free_list;
-    FreeBlock  *cur  = free_list;
+    /* Try twice: once with existing heap, once after growing. */
+    for (int attempt = 0; attempt < 2; attempt++) {
+        FreeBlock **prev = &free_list;
+        FreeBlock  *cur  = free_list;
 
-    while (cur) {
-        if (cur->size >= needed) {
-            if (cur->size >= needed + MIN_BLOCK + 16) {
-                FreeBlock *remainder = (FreeBlock *)((uint8_t *)cur + needed);
-                remainder->size = cur->size - needed;
-                remainder->next = cur->next;
-                *prev = remainder;
-                cur->size = needed;
-            } else {
-                *prev = cur->next;
+        while (cur) {
+            if (cur->size >= needed) {
+                if (cur->size >= needed + MIN_BLOCK + 16) {
+                    FreeBlock *remainder = (FreeBlock *)((uint8_t *)cur + needed);
+                    remainder->size = cur->size - needed;
+                    remainder->next = cur->next;
+                    *prev = remainder;
+                    cur->size = needed;
+                } else {
+                    *prev = cur->next;
+                }
+
+                *(size_t *)cur = cur->size;
+                return (uint8_t *)cur + HEADER_SIZE;
             }
-
-            *(size_t *)cur = cur->size;
-            return (uint8_t *)cur + HEADER_SIZE;
+            prev = &cur->next;
+            cur  = cur->next;
         }
-        prev = &cur->next;
-        cur  = cur->next;
+
+        if (attempt > 0) break;
+
+        /* Grow heap: allocate contiguous pages from PMM. */
+        size_t pages_needed = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
+        if (pages_needed < 4) pages_needed = 4;
+
+        void *base = pmm_alloc_page();
+        if (!base) return NULL;
+
+        size_t got = 1;
+        for (size_t i = 1; i < pages_needed; i++) {
+            void *p = pmm_alloc_page();
+            if (!p) break;
+            if (p != (uint8_t *)base + i * PAGE_SIZE) {
+                pmm_free_page(p);
+                break;
+            }
+            got++;
+        }
+
+        /* Add the new region to the free list via kfree. */
+        FreeBlock *blk = (FreeBlock *)base;
+        *(size_t *)blk = got * PAGE_SIZE;  /* write header for kfree */
+        kfree((uint8_t *)blk + HEADER_SIZE);
     }
 
-    /* Out of heap memory — try to get a page from PMM. */
-    void *page = pmm_alloc_page();
-    if (!page) return NULL;
+    return NULL;
+}
 
-    FreeBlock *blk = (FreeBlock *)page;
-    blk->size = PAGE_SIZE;
-    blk->next = NULL;
+/* ── Aligned allocation ──────────────────────────────────────────────────── */
 
-    /* Add to free list and retry. */
-    *prev = blk;
-    return kmalloc(size);
+void *
+kmalloc_aligned(size_t size, size_t align)
+{
+    if (size == 0 || align == 0) return NULL;
+    /* Over-allocate so we can align within the buffer and store
+     * the original pointer just before the aligned address. */
+    void *raw = kmalloc(size + align + sizeof(void *));
+    if (!raw) return NULL;
+    uintptr_t addr = ((uintptr_t)raw + sizeof(void *) + align - 1) & ~(align - 1);
+    ((void **)addr)[-1] = raw;
+    return (void *)addr;
 }
 
 /* ── Free ────────────────────────────────────────────────────────────────── */

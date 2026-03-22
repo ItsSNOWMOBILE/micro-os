@@ -76,6 +76,7 @@ MM_DIR    = $(KERN_DIR)/mm
 DRV_DIR   = $(KERN_DIR)/drivers
 SCHED_DIR = $(KERN_DIR)/sched
 FS_DIR    = $(KERN_DIR)/fs
+NET_DIR   = $(KERN_DIR)/net
 HAL_DIR   = $(KERN_DIR)/hal
 
 KERN_C_SRC = $(KERN_DIR)/main.c \
@@ -95,8 +96,14 @@ KERN_C_SRC = $(KERN_DIR)/main.c \
              $(DRV_DIR)/timer.c \
              $(DRV_DIR)/keyboard.c \
              $(DRV_DIR)/mouse.c \
+             $(DRV_DIR)/pci.c \
+             $(DRV_DIR)/ata.c \
+             $(DRV_DIR)/virtio_net.c \
+             $(DRV_DIR)/xhci.c \
              $(SCHED_DIR)/task.c \
              $(FS_DIR)/vfs.c \
+             $(FS_DIR)/fat32.c \
+             $(NET_DIR)/net.c \
              $(HAL_DIR)/hal.c
 
 KERN_ASM_SRC = $(KERN_DIR)/entry.asm \
@@ -124,14 +131,19 @@ BOOT_OBJ     = $(patsubst %.c,$(BUILD)/%.o,$(BOOT_C_SRC))
 
 all: $(BUILD)/micro-os.img
 
-run: $(BUILD)/micro-os.img
+run: $(BUILD)/micro-os.img $(BUILD)/fat32.img
 	$(QEMU) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
 		-drive format=raw,file=$(BUILD)/micro-os.img \
+		-drive if=ide,index=1,format=raw,file=$(BUILD)/fat32.img \
 		-m 256M \
 		-serial stdio \
 		-display gtk \
-		-usb
+		-netdev user,id=net0 \
+		-device virtio-net-pci,netdev=net0,disable-modern=on,disable-legacy=off \
+		-device qemu-xhci,id=xhci \
+		-device usb-tablet,bus=xhci.0 \
+		-device usb-hub,bus=xhci.0
 
 clean:
 	rm -rf $(BUILD)
@@ -155,6 +167,10 @@ $(BUILD)/kernel/sched/%.o: kernel/sched/%.asm
 	$(NASM) -f win64 $< -o $@
 
 $(BUILD)/kernel/fs/%.o: kernel/fs/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(KERN_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/net/%.o: kernel/net/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(KERN_CFLAGS) -c $< -o $@
 
@@ -189,6 +205,11 @@ $(BUILD)/BOOTX64.EFI: $(BOOT_OBJ) $(BUILD)/kernel_blob.o
 
 $(BUILD)/micro-os.img: $(BUILD)/BOOTX64.EFI
 	python3 tools/mkimg.py $(BUILD)/BOOTX64.EFI $@
+
+# ── FAT32 test image ─────────────────────────────────────────────────────
+
+$(BUILD)/fat32.img: tools/mkfat32.py
+	python3 tools/mkfat32.py $@
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 

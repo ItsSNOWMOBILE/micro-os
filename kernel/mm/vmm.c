@@ -152,6 +152,46 @@ vmm_unmap_page(uint64_t virt)
 }
 
 void
+vmm_map_mmio(uint64_t phys, uint64_t size)
+{
+    /* Round down to 2 MiB boundary, round up size. */
+    uint64_t start = phys & ~(0x200000ULL - 1);
+    uint64_t end   = (phys + size + 0x200000ULL - 1) & ~(0x200000ULL - 1);
+
+    uint64_t flags = PTE_PRESENT | PTE_WRITABLE;
+
+    for (uint64_t addr = start; addr < end; addr += 0x200000) {
+        uint64_t i4 = pml4_index(addr);
+        uint64_t i3 = pdpt_index(addr);
+        uint64_t i2 = pd_index(addr);
+
+        /* Ensure PML4 entry exists. */
+        if (!(pml4[i4] & PTE_PRESENT)) {
+            pte_t *pdpt = alloc_table();
+            if (!pdpt) return;
+            memset(pdpt, 0, 4096);
+            pml4[i4] = (uint64_t)pdpt | flags;
+        }
+
+        /* Ensure PDPT entry exists. */
+        pte_t *pdpt = (pte_t *)(pml4[i4] & PTE_ADDR_MASK);
+        if (!(pdpt[i3] & PTE_PRESENT)) {
+            pte_t *pd = alloc_table();
+            if (!pd) return;
+            memset(pd, 0, 4096);
+            pdpt[i3] = (uint64_t)pd | flags;
+        }
+
+        /* Set 2 MiB huge page in PD. */
+        pte_t *pd = (pte_t *)(pdpt[i3] & PTE_ADDR_MASK);
+        pd[i2] = addr | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE
+                | PTE_NOCACHE | PTE_WRITETHROUGH;
+
+        __asm__ volatile("invlpg (%0)" : : "r"(addr) : "memory");
+    }
+}
+
+void
 vmm_mark_huge_user(uint64_t virt)
 {
     /* Mark a 2 MiB huge page entry as user-accessible.

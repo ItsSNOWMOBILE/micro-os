@@ -14,6 +14,7 @@
 
 void  heap_init(void);
 void *kmalloc(size_t size);
+void *kmalloc_aligned(size_t size, size_t align);
 void  kfree(void *ptr);
 
 #endif /* HEAP_H */
