@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm gcc-mingw-w64-x86-64 qemu-system-x86 ovmf python3
+
+      - name: Build kernel and disk image
+        run: make
+
+      - name: Build FAT32 test image
+        run: make build/fat32.img
+
+      - name: Find OVMF firmware
+        run: |
+          OVMF_PATH=$(find /usr -name 'OVMF_CODE*.fd' ! -name '*secboot*' ! -name '*snakeoil*' -print -quit 2>/dev/null)
+          echo "OVMF=$OVMF_PATH"
+          test -f "$OVMF_PATH" || { echo "OVMF firmware not found"; exit 1; }
+          echo "OVMF=$OVMF_PATH" >> "$GITHUB_ENV"
+
+      - name: Boot test
+        run: |
+          echo "OVMF: ${{ env.OVMF }}"
+          echo "Disk: $(stat -c%s build/micro-os.img) bytes"
+          timeout 30 qemu-system-x86_64 \
+            -drive if=pflash,format=raw,readonly=on,file=${{ env.OVMF }} \
+            -drive format=raw,file=build/micro-os.img \
+            -drive if=ide,index=1,format=raw,file=build/fat32.img \
+            -m 256M \
+            -nographic \
+            -no-reboot \
+            -netdev user,id=net0 \
+            -device virtio-net-pci,netdev=net0,disable-modern=on,disable-legacy=off \
+            -device qemu-xhci,id=xhci \
+            -device usb-tablet,bus=xhci.0 \
+            -device usb-hub,bus=xhci.0 \
+            > boot.log 2>&1 || true
+          echo "--- boot.log ---"
+          cat boot.log
+          grep -q "Boot complete." boot.log

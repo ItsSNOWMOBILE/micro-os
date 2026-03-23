@@ -2,6 +2,16 @@
 
 A 64-bit operating system kernel written from scratch in C and x86-64 assembly. Boots via UEFI, runs on real hardware and QEMU. No external runtime dependencies — every line from bootloader to shell is handwritten.
 
+## Demo
+
+**Shell and software features** — boot sequence, filesystem, process management:
+
+![Shell and software demo](https://i.imgur.com/3ceOZUZ.gif)
+
+**Drivers and networking** — PCI enumeration, USB devices, ICMP ping, FAT32:
+
+![Drivers and networking demo](https://i.imgur.com/SR4j8Rb.gif)
+
 ## Features
 
 ### Core
@@ -200,6 +210,16 @@ tools/
 | Heap | PMM-allocated pages | Dynamic kernel allocations |
 | Framebuffer | `0x80000000` (typical) | GOP linear framebuffer |
 | User stacks | `0x7FFFFFFFE000` ↓ | Per-task Ring 3 stacks (16 KiB each) |
+
+## Known limitations
+
+- **Single-core only** — no SMP or multiprocessor support
+- **No TCP/UDP** — network stack handles ARP and ICMP (ping) only
+- **No USB class drivers** — xHCI enumerates devices but has no HID, mass storage, etc.
+- **Read-only disks** — ATA and FAT32 drivers support reads only, no write path
+- **No userspace heap** — user tasks get a fixed 16 KiB stack, no brk/mmap
+- **VFS file size cap** — ramfs files limited to 16 KiB
+- **Static ELF only** — no shared libraries or dynamic linking
 
 ## License
 
