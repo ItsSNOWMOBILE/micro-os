@@ -229,7 +229,8 @@ keyboard_handler(InterruptFrame *frame)
     kbd_push((uint16_t)c);
 
 eoi:
-    outb(0x20, 0x20);
+    /* EOI is sent by isr_dispatch after we return. */
+    (void)0;
 }
 
 void

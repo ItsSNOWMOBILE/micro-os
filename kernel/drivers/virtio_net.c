@@ -85,11 +85,13 @@ virtq_init(Virtqueue *vq, int qsel)
     if (!base) return -1;
     for (uint64_t i = 1; i < npages; i++) {
         void *p = pmm_alloc_page();
-        if ((uint8_t *)p != base + i * 4096) {
-            /* Not contiguous. For simplicity, just use what we got — this
-             * works when called early before fragmentation. */
+        if (!p || (uint8_t *)p != base + i * 4096) {
+            /* Not contiguous — cannot proceed safely. */
+            if (p) pmm_free_page(p);
+            for (uint64_t j = 0; j < i; j++)
+                pmm_free_page(base + j * 4096);
+            return -1;
         }
-        (void)p;
     }
 
     memset(base, 0, npages * 4096);
@@ -243,6 +245,8 @@ virtio_net_rx_poll(void (*cb)(const void *frame, uint16_t len, void *ctx),
         uint16_t ui = rxq.last_used % rxq.size;
         uint32_t di = rxq.used->ring[ui].id;
         uint32_t plen = rxq.used->ring[ui].len;
+
+        if (di >= rxq.size) { rxq.last_used++; continue; }
 
         if (plen > VIRTIO_NET_HDR_SIZE && rxq.buffers[di]) {
             cb(rxq.buffers[di] + VIRTIO_NET_HDR_SIZE,

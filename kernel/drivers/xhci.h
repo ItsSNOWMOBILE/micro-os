@@ -79,10 +79,10 @@
 /* ── TRB (Transfer Request Block) ────────────────────────────────────────── */
 
 typedef struct {
-    uint32_t param_lo;
-    uint32_t param_hi;
-    uint32_t status;
-    uint32_t control;
+    volatile uint32_t param_lo;
+    volatile uint32_t param_hi;
+    volatile uint32_t status;
+    volatile uint32_t control;
 } __attribute__((packed)) XhciTrb;
 
 /* TRB types (bits [15:10] of control). */

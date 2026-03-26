@@ -238,9 +238,10 @@ vfs_write(int fd, const void *buf, size_t count)
     if (!vn->data)
         return -1;
 
-    size_t end = fds[fd].offset + count;
-    if (end > vn->capacity)
+    if (count > vn->capacity || fds[fd].offset > vn->capacity - count) {
+        if (fds[fd].offset >= vn->capacity) return 0;
         count = vn->capacity - fds[fd].offset;
+    }
 
     if (count == 0)
         return 0;
@@ -377,8 +378,13 @@ vfs_rename(const char *old_path, const char *new_path)
     if (new_parent == -1 || vnodes[new_parent].type != VFS_DIRECTORY)
         return -1;
 
-    /* Remove from old parent. */
+    /* Check capacity BEFORE removing from old parent to avoid orphaning. */
+    VNode *npdir = &vnodes[new_parent];
     int old_parent = vnodes[idx].parent;
+    if (new_parent != old_parent && npdir->child_count >= 32)
+        return -1;
+
+    /* Remove from old parent. */
     if (old_parent >= 0) {
         VNode *pdir = &vnodes[old_parent];
         for (int i = 0; i < pdir->child_count; i++) {
@@ -392,9 +398,6 @@ vfs_rename(const char *old_path, const char *new_path)
     }
 
     /* Add to new parent. */
-    VNode *npdir = &vnodes[new_parent];
-    if (npdir->child_count >= 32)
-        return -1;
     npdir->children[npdir->child_count++] = idx;
 
     /* Update the vnode. */

@@ -148,6 +148,7 @@ lfn_append(const Fat32LfnEntry *lfn)
 {
     /* LFN entries come in reverse order. Each holds 13 UCS-2 chars. */
     int seq = (lfn->order & 0x3F) - 1;
+    if (seq < 0 || seq * 13 + 13 > FAT32_MAX_NAME) return;
     int base = seq * 13;
 
     uint16_t chars[13];
@@ -205,7 +206,13 @@ iterate_dir(uint32_t cluster, dir_cb cb, void *ctx)
 
     lfn_reset();
 
+    uint32_t max_clusters = 0;
+    if (sectors_per_cluster > 0 && data_start_lba > 0)
+        max_clusters = (0xFFFFFFFFu - data_start_lba) / sectors_per_cluster;
+    uint32_t steps = 0;
+
     while (cluster >= 2 && cluster < FAT32_EOC) {
+        if (++steps > max_clusters) { kfree(cluster_buf); return -1; }
         uint32_t lba = cluster_to_lba(cluster);
 
         for (uint32_t s = 0; s < sectors_per_cluster; s++) {
@@ -370,6 +377,13 @@ fat32_init(int drive)
         kprintf("FAT32: not a FAT32 volume\n");
         return -1;
     }
+    if (bpb->sectors_per_cluster == 0 ||
+        (bpb->sectors_per_cluster & (bpb->sectors_per_cluster - 1)) != 0 ||
+        bpb->sectors_per_cluster > 128) {
+        kprintf("FAT32: invalid sectors_per_cluster %d\n",
+                bpb->sectors_per_cluster);
+        return -1;
+    }
 
     ata_drive           = drive;
     bytes_per_sector    = bpb->bytes_per_sector;
@@ -470,7 +484,13 @@ fat32_read_file(const char *path, void *buf, uint32_t buf_size)
     uint8_t *cluster_buf = kmalloc(cluster_size);
     if (!cluster_buf) return -1;
 
+    uint32_t max_cl = 0;
+    if (sectors_per_cluster > 0 && data_start_lba > 0)
+        max_cl = (0xFFFFFFFFu - data_start_lba) / sectors_per_cluster;
+    uint32_t cl_steps = 0;
+
     while (remaining > 0 && cluster >= 2 && cluster < FAT32_EOC) {
+        if (++cl_steps > max_cl) { kfree(cluster_buf); return -1; }
         uint32_t lba = cluster_to_lba(cluster);
         for (uint32_t s = 0; s < sectors_per_cluster; s++) {
             if (read_sector(lba + s, cluster_buf + s * bytes_per_sector) < 0) {

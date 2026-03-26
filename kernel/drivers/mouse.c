@@ -214,9 +214,8 @@ mouse_handler(InterruptFrame *frame)
     }
 
 eoi:
-    /* IRQ 12 is on the slave PIC — send EOI to both. */
-    outb(0xA0, 0x20);
-    outb(0x20, 0x20);
+    /* EOI is sent by isr_dispatch after we return. */
+    (void)0;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -298,14 +297,18 @@ int32_t mouse_y(void) { return mouse_py; }
 void
 mouse_hide_cursor(void)
 {
+    __asm__ volatile("cli");
     erase_cursor();
+    __asm__ volatile("sti");
 }
 
 void
 mouse_show_cursor(void)
 {
+    __asm__ volatile("cli");
     if (!cursor_visible)
         draw_cursor(mouse_px, mouse_py);
+    __asm__ volatile("sti");
 }
 
 /* ── HAL registration ───────────────────────────────────────────────────── */

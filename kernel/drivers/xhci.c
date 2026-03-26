@@ -144,7 +144,12 @@ static void
 cmd_ring_push(XhciTrb *trb)
 {
     trb->control = (trb->control & ~1u) | cmd_cycle;
-    cmd_ring[cmd_enq] = *trb;
+    /* Write all fields before the cycle bit becomes visible to HW. */
+    cmd_ring[cmd_enq].param_lo = trb->param_lo;
+    cmd_ring[cmd_enq].param_hi = trb->param_hi;
+    cmd_ring[cmd_enq].status   = trb->status;
+    __asm__ volatile("" ::: "memory");  /* barrier: fields before control */
+    cmd_ring[cmd_enq].control  = trb->control;
     cmd_enq++;
     if (cmd_enq >= CMD_RING_SIZE - 1) {
         /* Update link TRB cycle bit. */
@@ -181,7 +186,8 @@ evt_ring_poll(int timeout_ms)
 {
     uint64_t deadline = timer_ticks() + (uint64_t)timeout_ms / 10 + 1;
     while (timer_ticks() < deadline) {
-        XhciTrb *trb = &evt_ring[evt_deq];
+        __asm__ volatile("" ::: "memory");  /* compiler barrier before DMA read */
+        volatile XhciTrb *trb = (volatile XhciTrb *)&evt_ring[evt_deq];
         if ((trb->control & 1) == (uint32_t)evt_cycle) {
             evt_deq++;
             if (evt_deq >= EVT_RING_SIZE) {
@@ -192,7 +198,7 @@ evt_ring_poll(int timeout_ms)
             uintptr_t ir0 = rt_base + 0x20;
             wr64(ir0 + XHCI_IR_ERDP,
                  (uintptr_t)&evt_ring[evt_deq] | (1u << 3));  /* EHB=1 */
-            return trb;
+            return (XhciTrb *)trb;
         }
     }
     return NULL;
@@ -219,7 +225,12 @@ static void
 ep0_push(SlotData *s, XhciTrb *trb)
 {
     trb->control = (trb->control & ~1u) | s->ep0_cycle;
-    s->ep0_ring[s->ep0_enq] = *trb;
+    /* Write all fields before the cycle bit becomes visible to HW. */
+    s->ep0_ring[s->ep0_enq].param_lo = trb->param_lo;
+    s->ep0_ring[s->ep0_enq].param_hi = trb->param_hi;
+    s->ep0_ring[s->ep0_enq].status   = trb->status;
+    __asm__ volatile("" ::: "memory");  /* barrier: fields before control */
+    s->ep0_ring[s->ep0_enq].control  = trb->control;
     s->ep0_enq++;
     if (s->ep0_enq >= EP0_RING_SIZE - 1) {
         s->ep0_ring[EP0_RING_SIZE - 1].control =
@@ -480,8 +491,8 @@ enumerate_port(int port)
 static void
 alloc_scratchpad(uint32_t hcsparams2)
 {
-    uint32_t sp_hi = (hcsparams2 >> 21) & 0x1F;
-    uint32_t sp_lo = (hcsparams2 >> 27) & 0x1F;
+    uint32_t sp_lo = (hcsparams2 >> 21) & 0x1F;
+    uint32_t sp_hi = (hcsparams2 >> 27) & 0x1F;
     uint32_t num_sp = (sp_hi << 5) | sp_lo;
     if (num_sp == 0) return;
 
@@ -491,6 +502,7 @@ alloc_scratchpad(uint32_t hcsparams2)
     for (uint32_t i = 0; i < num_sp; i++) {
         void *buf = pmm_alloc_page();
         if (!buf) break;
+        /* Safe: PMM returns addresses within the 0-4 GiB identity map. */
         memset(buf, 0, 4096);
         sp_array[i] = (uintptr_t)buf;
     }
@@ -516,11 +528,16 @@ xhci_init(void)
     }
     if (!pdev) return -1;
 
-    /* BAR0 is a 64-bit memory BAR. */
+    /* BAR0 is a memory BAR. */
     if (pdev->bar[0] & 1) return -1;  /* must be MMIO, not I/O */
     uint64_t bar0 = pdev->bar[0] & 0xFFFFFFF0u;
-    uint64_t bar1 = pdev->bar[1];
-    mmio_base = (uintptr_t)(bar0 | (bar1 << 32));
+    if (((pdev->bar[0] >> 1) & 0x3) == 0x2) {
+        /* 64-bit BAR: combine BAR0 and BAR1. */
+        mmio_base = (uintptr_t)(bar0 | ((uint64_t)pdev->bar[1] << 32));
+    } else {
+        /* 32-bit BAR. */
+        mmio_base = (uintptr_t)bar0;
+    }
     if (!mmio_base) return -1;
 
     /* Map MMIO region if above 4 GiB (our identity mapping only covers 0-4G). */

@@ -14,9 +14,6 @@ section .data
 global _syscall_kernel_rsp
 _syscall_kernel_rsp: dq 0
 
-section .bss
-_user_rsp: resq 1
-
 section .text
 
 extern syscall_dispatch
@@ -24,15 +21,14 @@ extern syscall_dispatch
 global syscall_entry
 
 syscall_entry:
-    ; Disable interrupts immediately to prevent preemption while
-    ; the global _user_rsp is in use.  Re-enabled after we push
-    ; it onto the per-task kernel stack.
     cli
-    mov  [rel _user_rsp], rsp
+    ; Save user RSP in R8 (not part of syscall ABI: args use RDI/RSI/RDX/R10).
+    ; This avoids a global variable that would break under SMP.
+    mov  r8, rsp
     mov  rsp, [rel _syscall_kernel_rsp]
 
     ; Build a save frame on the kernel stack.
-    push qword [rel _user_rsp]  ; user RSP
+    push r8                              ; user RSP
     push r11                     ; user RFLAGS
     push rcx                     ; user RIP
 

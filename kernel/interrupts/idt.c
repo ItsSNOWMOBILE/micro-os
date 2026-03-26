@@ -325,6 +325,13 @@ isr_dispatch(InterruptFrame *frame)
 
     if (vector < IDT_ENTRIES && handlers[vector]) {
         handlers[vector](frame);
+        /* Send EOI for hardware IRQs (vectors 32-47) centrally,
+         * so individual handlers don't need to remember. */
+        if (vector >= 32 && vector < 48) {
+            if (vector >= 40)
+                outb(PIC2_CMD, 0x20);
+            outb(PIC1_CMD, 0x20);
+        }
         return;
     }
 

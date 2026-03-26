@@ -29,8 +29,7 @@ timer_handler(InterruptFrame *frame)
     (void)frame;
     g_ticks++;
 
-    /* Send EOI to master PIC. */
-    outb(0x20, 0x20);
+    /* EOI is sent by isr_dispatch after we return. */
 
     /* Preemptive scheduling. */
     if (sched_active && !in_schedule) {

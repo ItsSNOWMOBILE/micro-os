@@ -182,12 +182,19 @@ resolve_abs(const char *input, char *out, int outlen)
 
     out[0] = '/';
     out[1] = '\0';
+    int cur = 1;
     for (int i = 0; i < depth; i++) {
-        if (i > 0) strcat(out, "/");
-        else out[1] = '\0';
-        int cur = (int)strlen(out);
-        strncpy(out + cur, components[i], outlen - cur - 1);
-        out[outlen - 1] = '\0';
+        if (i > 0 && cur < (int)outlen - 1) {
+            out[cur++] = '/';
+            out[cur] = '\0';
+        }
+        if (i == 0) { out[1] = '\0'; cur = 1; }
+        int remain = (int)outlen - cur - 1;
+        if (remain > 0) {
+            strncpy(out + cur, components[i], remain);
+            out[outlen - 1] = '\0';
+            cur += (int)strlen(out + cur);
+        }
     }
 }
 

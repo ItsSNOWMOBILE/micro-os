@@ -272,8 +272,11 @@ handle_ipv4(const uint8_t *data, uint16_t len)
     /* Verify header checksum. */
     if (ip_checksum(ip, 20) != 0) return;
 
-    if (ip->protocol == IP_PROTO_ICMP)
-        handle_icmp(data, ntohs(ip->total_len), ip);
+    if (ip->protocol == IP_PROTO_ICMP) {
+        uint16_t ip_len = ntohs(ip->total_len);
+        if (ip_len > len) ip_len = len;
+        handle_icmp(data, ip_len, ip);
+    }
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
