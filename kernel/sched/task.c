@@ -57,10 +57,19 @@ task_exit_trampoline(void)
 static Task *
 do_task_create(const char *name, void (*entry)(void), int priority)
 {
-    if (task_count >= MAX_TASKS)
-        return NULL;
-
-    int slot = task_count;
+    /* Try to reuse a dead slot first. */
+    int slot = -1;
+    for (int i = 1; i < task_count; i++) {
+        if (tasks[i].state == TASK_DEAD && tasks[i].stack_base == NULL) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (task_count >= MAX_TASKS)
+            return NULL;
+        slot = task_count;
+    }
     Task *t = &tasks[slot];
 
     /* Allocate a stack before committing the slot. */
@@ -70,7 +79,7 @@ do_task_create(const char *name, void (*entry)(void), int priority)
         return NULL;
     }
 
-    task_count++;
+    if (slot >= task_count) task_count = slot + 1;
     t->id    = next_id++;
     t->state = TASK_READY;
     t->name  = name;
@@ -78,6 +87,7 @@ do_task_create(const char *name, void (*entry)(void), int priority)
     t->exit_code = 0;
     t->parent_id = tasks[current_task].id;
     t->wait_for_id = 0;
+    t->pending_slot = -1;
 
     uint64_t stack_top = (uint64_t)(t->stack_base + TASK_STACK_SIZE);
     stack_top &= ~(uint64_t)0xF;

@@ -62,6 +62,8 @@ typedef struct Task {
 
     /* Per-process address space. NULL = use kernel page tables. */
     uint64_t  *pml4;           /* task's own PML4 (physical address) */
+
+    int        pending_slot;   /* index into pending_user/elf_pending (-1 = none) */
 } Task;
 
 void  sched_init(void);

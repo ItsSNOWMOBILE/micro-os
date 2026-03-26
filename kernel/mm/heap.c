@@ -10,13 +10,22 @@
 #include "heap.h"
 #include "pmm.h"
 #include "../string.h"
+#include "../sync.h"
 
 typedef struct FreeBlock {
     size_t             size;
     struct FreeBlock  *next;
 } FreeBlock;
 
-#define HEADER_SIZE   sizeof(size_t)
+/* Header: [size][canary] where canary = ~size. */
+#define HEADER_SIZE   (2 * sizeof(size_t))
+#define HEAP_CANARY(sz) (~(sz))
+
+static Spinlock heap_lock = SPINLOCK_INIT;
+
+/* Track heap bounds for kfree validation. */
+static uintptr_t heap_start;
+static uintptr_t heap_end;
 #define MIN_BLOCK     (sizeof(FreeBlock))
 #define HEAP_PAGES    64        /* initial heap: 256 KiB */
 
@@ -50,6 +59,9 @@ heap_init(void)
     free_list = (FreeBlock *)base;
     free_list->size = total;
     free_list->next = NULL;
+
+    heap_start = (uintptr_t)base;
+    heap_end   = heap_start + total;
 }
 
 /* ── Allocation ──────────────────────────────────────────────────────────── */
@@ -64,6 +76,8 @@ kmalloc(size_t size)
     size_t needed = size + HEADER_SIZE;
     if (needed < MIN_BLOCK)
         needed = MIN_BLOCK;
+
+    spin_lock(&heap_lock);
 
     /* Try twice: once with existing heap, once after growing. */
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -82,7 +96,10 @@ kmalloc(size_t size)
                     *prev = cur->next;
                 }
 
-                *(size_t *)cur = cur->size;
+                size_t *hdr = (size_t *)cur;
+                hdr[0] = cur->size;
+                hdr[1] = HEAP_CANARY(cur->size);
+                spin_unlock(&heap_lock);
                 return (uint8_t *)cur + HEADER_SIZE;
             }
             prev = &cur->next;
@@ -91,7 +108,10 @@ kmalloc(size_t size)
 
         if (attempt > 0) break;
 
-        /* Grow heap: allocate contiguous pages from PMM. */
+        /* Grow heap: allocate contiguous pages from PMM.
+         * Must release lock since pmm_alloc_page takes its own lock. */
+        spin_unlock(&heap_lock);
+
         size_t pages_needed = (needed + PAGE_SIZE - 1) / PAGE_SIZE;
         if (pages_needed < 4) pages_needed = 4;
 
@@ -109,12 +129,43 @@ kmalloc(size_t size)
             got++;
         }
 
-        /* Add the new region to the free list via kfree. */
+        /* Update heap bounds. */
+        spin_lock(&heap_lock);
+        uintptr_t new_end = (uintptr_t)base + got * PAGE_SIZE;
+        if (new_end > heap_end) heap_end = new_end;
+        if ((uintptr_t)base < heap_start) heap_start = (uintptr_t)base;
+
+        /* Add the new region to the free list directly. */
         FreeBlock *blk = (FreeBlock *)base;
-        *(size_t *)blk = got * PAGE_SIZE;  /* write header for kfree */
-        kfree((uint8_t *)blk + HEADER_SIZE);
+        blk->size = got * PAGE_SIZE;
+
+        /* Insert into sorted free list. */
+        FreeBlock **gprev = &free_list;
+        FreeBlock  *gcur  = free_list;
+        while (gcur && gcur < blk) {
+            gprev = &gcur->next;
+            gcur  = gcur->next;
+        }
+        blk->next = gcur;
+        *gprev = blk;
+
+        /* Coalesce with next. */
+        if (gcur && (uint8_t *)blk + blk->size == (uint8_t *)gcur) {
+            blk->size += gcur->size;
+            blk->next  = gcur->next;
+        }
+        /* Coalesce with previous. */
+        if (gprev != &free_list) {
+            FreeBlock *p = (FreeBlock *)((uint8_t *)gprev -
+                            __builtin_offsetof(FreeBlock, next));
+            if ((uint8_t *)p + p->size == (uint8_t *)blk) {
+                p->size += blk->size;
+                p->next  = blk->next;
+            }
+        }
     }
 
+    spin_unlock(&heap_lock);
     return NULL;
 }
 
@@ -123,7 +174,8 @@ kmalloc(size_t size)
 void *
 kmalloc_aligned(size_t size, size_t align)
 {
-    if (size == 0 || align == 0) return NULL;
+    if (size == 0 || align == 0 || (align & (align - 1)) != 0) return NULL;
+    if (size > SIZE_MAX - align - sizeof(void *)) return NULL;
     /* Over-allocate so we can align within the buffer and store
      * the original pointer just before the aligned address. */
     void *raw = kmalloc(size + align + sizeof(void *));
@@ -141,8 +193,17 @@ kfree(void *ptr)
     if (!ptr) return;
 
     FreeBlock *blk = (FreeBlock *)((uint8_t *)ptr - HEADER_SIZE);
-    size_t block_size = *(size_t *)blk;
+    size_t *hdr = (size_t *)blk;
+    size_t block_size = hdr[0];
+
+    /* Validate canary and range. */
+    if (hdr[1] != HEAP_CANARY(block_size)) return;
+    if ((uintptr_t)blk < heap_start ||
+        (uintptr_t)blk + block_size > heap_end) return;
+
     blk->size = block_size;
+
+    spin_lock(&heap_lock);
 
     /* Insert into the sorted free list. */
     FreeBlock **prev = &free_list;
@@ -171,4 +232,6 @@ kfree(void *ptr)
             p->next  = blk->next;
         }
     }
+
+    spin_unlock(&heap_lock);
 }

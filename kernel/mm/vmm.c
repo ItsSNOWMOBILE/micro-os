@@ -39,6 +39,8 @@ static pte_t *
 alloc_table(void)
 {
     pte_t *table = (pte_t *)pmm_alloc_page();
+    if (table)
+        memset(table, 0, 4096);
     return table;
 }
 
@@ -110,15 +112,16 @@ vmm_init(void)
     /* PTE_USER on intermediates is permissive — leaf entries still control
      * actual access.  Setting it here allows user-mode pages to exist
      * anywhere under PML4[0] without needing to retroactively fix parents. */
-    init_pml4[0] = (uint64_t)init_pdpt | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+    init_pml4[0] = (uint64_t)init_pdpt | PTE_PRESENT | PTE_WRITABLE;
 
     /*
      * Identity-map the first 4 GiB using 2 MiB huge pages.
      * PML4[0] → PDPT[0..3] → PD[0..511] each with PTE_HUGE.
+     * No PTE_USER here — user pages get it set explicitly via walk().
      */
     for (int i = 0; i < 4; i++) {
         memset(init_pd[i], 0, sizeof(init_pd[i]));
-        init_pdpt[i] = (uint64_t)init_pd[i] | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+        init_pdpt[i] = (uint64_t)init_pd[i] | PTE_PRESENT | PTE_WRITABLE;
 
         for (int j = 0; j < 512; j++) {
             uint64_t phys = (uint64_t)i * (512ULL * 0x200000)
@@ -220,11 +223,14 @@ vmm_create_address_space(void)
     pte_t *new_pml4 = alloc_table();
     if (!new_pml4) return NULL;
 
-    /* Clone the kernel's PML4 entries.  Since all kernel mappings live
-     * in PML4[0] (identity-mapped first 4 GiB), we copy all 512 entries
-     * so the new address space has full access to kernel memory. User
-     * pages will be mapped into the lower half at unique addresses. */
-    for (int i = 0; i < 512; i++)
+    /* Zero user half (PML4[0..255]), clone kernel half (PML4[256..511]).
+     * PML4[0] is the identity map — also cloned so the kernel can access
+     * physical memory, but without PTE_USER so Ring 3 can't reach it.
+     * User pages are mapped at unique addresses per process. */
+    memset(new_pml4, 0, 256 * sizeof(pte_t));
+    /* Copy PML4[0] for kernel identity-map access (no PTE_USER). */
+    new_pml4[0] = pml4[0];
+    for (int i = 256; i < 512; i++)
         new_pml4[i] = pml4[i];
 
     return new_pml4;

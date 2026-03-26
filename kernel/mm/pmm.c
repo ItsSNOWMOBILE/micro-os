@@ -14,7 +14,9 @@
 #include "pmm.h"
 #include "../../boot/bootinfo.h"
 #include "../string.h"
+#include "../sync.h"
 
+static Spinlock  pmm_lock = SPINLOCK_INIT;
 static uint64_t *bitmap;
 static uint64_t  bitmap_size;    /* bytes */
 static uint64_t  total_pages;
@@ -203,6 +205,7 @@ pmm_init(void *mmap, uint32_t mmap_count,
 void *
 pmm_alloc_page(void)
 {
+    spin_lock(&pmm_lock);
     uint64_t qwords = bitmap_size / 8;
 
     for (uint64_t i = 0; i < qwords; i++) {
@@ -212,17 +215,22 @@ pmm_alloc_page(void)
         /* __builtin_ctzll: count trailing zeros — finds the lowest set bit. */
         int bit = __builtin_ctzll(bitmap[i]);
         uint64_t page = i * 64 + bit;
-        if (page >= total_pages)
+        if (page >= total_pages) {
+            spin_unlock(&pmm_lock);
             return NULL;
+        }
 
         bitmap_clear(page);
         free_count--;
+        spin_unlock(&pmm_lock);
 
-        void *addr = (void *)(page * PAGE_SIZE);
-        memset(addr, 0, PAGE_SIZE);
-        return addr;
+        /* Return physical address.  Callers that need zeroed pages must
+         * zero through their own virtual mapping (or via the identity map
+         * for addresses below 4 GiB). */
+        return (void *)(page * PAGE_SIZE);
     }
 
+    spin_unlock(&pmm_lock);
     return NULL;
 }
 
@@ -232,10 +240,12 @@ pmm_free_page(void *addr)
     uint64_t page = (uint64_t)addr / PAGE_SIZE;
     if (page >= total_pages)
         return;
+    spin_lock(&pmm_lock);
     if (!bitmap_test(page)) {
         bitmap_set(page);
         free_count++;
     }
+    spin_unlock(&pmm_lock);
 }
 
 uint64_t

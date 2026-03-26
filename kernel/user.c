@@ -38,16 +38,15 @@ user_task_trampoline(void)
 {
     Task *t = sched_current();
 
-    /* Find our pending info by scanning for a matching entry. */
+    /* Retrieve our pending info by slot index stored in the task. */
     uint64_t entry = 0, user_rsp = 0;
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (pending_user[i].entry != 0 && pending_user[i].user_rsp != 0) {
-            entry = pending_user[i].entry;
-            user_rsp = pending_user[i].user_rsp;
-            pending_user[i].entry = 0;
-            pending_user[i].user_rsp = 0;
-            break;
-        }
+    int slot = t->pending_slot;
+    if (slot >= 0 && slot < MAX_TASKS && pending_user[slot].entry != 0) {
+        entry = pending_user[slot].entry;
+        user_rsp = pending_user[slot].user_rsp;
+        pending_user[slot].entry = 0;
+        pending_user[slot].user_rsp = 0;
+        t->pending_slot = -1;
     }
 
     if (!entry) {
@@ -80,6 +79,7 @@ user_task_create(const char *name, void (*entry)(void))
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         void *page = pmm_alloc_page();
         if (!page) return NULL;
+        memset(page, 0, 4096);
         uint64_t virt = user_stack_bottom + (uint64_t)i * 4096;
         vmm_map_page_in(task_pml4, virt, (uint64_t)page, PTE_WRITABLE | PTE_USER);
     }
@@ -107,6 +107,7 @@ user_task_create(const char *name, void (*entry)(void))
     if (t) {
         t->is_user = true;
         t->pml4 = task_pml4;
+        t->pending_slot = slot;
     }
     return t;
 }

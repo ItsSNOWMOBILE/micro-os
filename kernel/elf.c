@@ -32,16 +32,15 @@ elf_trampoline(void)
 {
     Task *t = sched_current();
 
-    /* Find our pending info. */
+    /* Retrieve our pending info by slot index stored in the task. */
     uint64_t entry = 0, user_rsp = 0;
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (elf_pending[i].entry != 0) {
-            entry = elf_pending[i].entry;
-            user_rsp = elf_pending[i].user_rsp;
-            elf_pending[i].entry = 0;
-            elf_pending[i].user_rsp = 0;
-            break;
-        }
+    int slot = t->pending_slot;
+    if (slot >= 0 && slot < MAX_TASKS && elf_pending[slot].entry != 0) {
+        entry = elf_pending[slot].entry;
+        user_rsp = elf_pending[slot].user_rsp;
+        elf_pending[slot].entry = 0;
+        elf_pending[slot].user_rsp = 0;
+        t->pending_slot = -1;
     }
 
     if (!entry) {
@@ -102,10 +101,28 @@ elf_load(const char *path, const char *name)
     uint64_t *task_pml4 = vmm_create_address_space();
     if (!task_pml4) { kfree(buf); return NULL; }
 
+    /* Validate program header table bounds. */
+    uint64_t ph_end = (uint64_t)ehdr->e_phoff +
+                      (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
+    if (ph_end > (uint64_t)st.size) {
+        kprintf("elf: %s: phdr out of bounds\n", path);
+        kfree(buf);
+        return NULL;
+    }
+
     /* Map PT_LOAD segments. */
     Elf64_Phdr *phdr = (Elf64_Phdr *)(buf + ehdr->e_phoff);
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != PT_LOAD) continue;
+
+        /* Validate segment bounds. */
+        if (phdr[i].p_offset + phdr[i].p_filesz > (uint64_t)st.size ||
+            phdr[i].p_memsz > 0x1000000 ||  /* 16 MiB limit */
+            phdr[i].p_vaddr + phdr[i].p_memsz >= 0x0000800000000000ULL) {
+            kprintf("elf: %s: bad segment\n", path);
+            kfree(buf);
+            return NULL;
+        }
 
         uint64_t vaddr = phdr[i].p_vaddr & ~0xFFFULL;
         uint64_t end   = (phdr[i].p_vaddr + phdr[i].p_memsz + 0xFFF) & ~0xFFFULL;
@@ -146,6 +163,7 @@ elf_load(const char *path, const char *name)
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         void *page = pmm_alloc_page();
         if (!page) return NULL;
+        memset(page, 0, 4096);
         uint64_t virt = user_stack_bottom + (uint64_t)i * 4096;
         vmm_map_page_in(task_pml4, virt, (uint64_t)page, PTE_WRITABLE | PTE_USER);
     }
@@ -168,6 +186,7 @@ elf_load(const char *path, const char *name)
     if (t) {
         t->is_user = true;
         t->pml4 = task_pml4;
+        t->pending_slot = slot;
     }
     return t;
 }

@@ -24,7 +24,10 @@ extern syscall_dispatch
 global syscall_entry
 
 syscall_entry:
-    ; Save user RSP, load kernel RSP.
+    ; Disable interrupts immediately to prevent preemption while
+    ; the global _user_rsp is in use.  Re-enabled after we push
+    ; it onto the per-task kernel stack.
+    cli
     mov  [rel _user_rsp], rsp
     mov  rsp, [rel _syscall_kernel_rsp]
 

@@ -12,26 +12,39 @@
 
 typedef struct {
     volatile uint32_t lock;
+    uint64_t          flags;  /* saved RFLAGS for interrupt restore */
 } Spinlock;
 
-#define SPINLOCK_INIT { .lock = 0 }
+#define SPINLOCK_INIT { .lock = 0, .flags = 0 }
 
-static inline void spin_init(Spinlock *s) { s->lock = 0; }
+static inline void spin_init(Spinlock *s) { s->lock = 0; s->flags = 0; }
 
 static inline void spin_lock(Spinlock *s)
 {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
     while (__sync_lock_test_and_set(&s->lock, 1))
         __asm__ volatile("pause");
+    s->flags = flags;
 }
 
 static inline void spin_unlock(Spinlock *s)
 {
+    uint64_t flags = s->flags;
     __sync_lock_release(&s->lock);
+    __asm__ volatile("push %0; popfq" :: "r"(flags));
 }
 
 static inline bool spin_try_lock(Spinlock *s)
 {
-    return __sync_lock_test_and_set(&s->lock, 1) == 0;
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
+    if (__sync_lock_test_and_set(&s->lock, 1) == 0) {
+        s->flags = flags;
+        return true;
+    }
+    __asm__ volatile("push %0; popfq" :: "r"(flags));
+    return false;
 }
 
 /* ── Mutex (sleeping lock) ───────────────────────────────────────────────── */

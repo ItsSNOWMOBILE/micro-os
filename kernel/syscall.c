@@ -19,6 +19,17 @@
 #include "interrupts/gdt.h"
 #include "fs/vfs.h"
 
+/* ── Userspace pointer validation ────────────────────────────────────────── */
+
+#define USER_ADDR_LIMIT  0x0000800000000000ULL
+#define SYSCALL_MAX_LEN  65536
+
+static bool
+uptr_valid(uint64_t addr, uint64_t len)
+{
+    return addr < USER_ADDR_LIMIT && len <= USER_ADDR_LIMIT - addr;
+}
+
 /* ── Syscall implementations (uniform 4-arg signature) ───────────────────── */
 
 static int64_t
@@ -33,8 +44,10 @@ static int64_t
 sys_write(int64_t fd, int64_t buf_addr, int64_t len, int64_t a3)
 {
     (void)a3;
-    const char *buf = (const char *)buf_addr;
     if (len < 0) return -1;
+    if (len > SYSCALL_MAX_LEN) len = SYSCALL_MAX_LEN;
+    if (!uptr_valid((uint64_t)buf_addr, (uint64_t)len)) return -1;
+    const char *buf = (const char *)buf_addr;
 
     if (fd == 1 || fd == 2) {
         /* stdout/stderr → console */
@@ -51,8 +64,10 @@ static int64_t
 sys_read(int64_t fd, int64_t buf_addr, int64_t len, int64_t a3)
 {
     (void)a3;
-    char *buf = (char *)buf_addr;
     if (len <= 0) return -1;
+    if (len > SYSCALL_MAX_LEN) len = SYSCALL_MAX_LEN;
+    if (!uptr_valid((uint64_t)buf_addr, (uint64_t)len)) return -1;
+    char *buf = (char *)buf_addr;
 
     if (fd == 0) {
         /* stdin → keyboard */
@@ -96,6 +111,7 @@ static int64_t
 sys_open(int64_t path_addr, int64_t create, int64_t a2, int64_t a3)
 {
     (void)a2; (void)a3;
+    if (!uptr_valid((uint64_t)path_addr, 1)) return -1;
     return (int64_t)vfs_open((const char *)path_addr, (bool)create);
 }
 
@@ -110,6 +126,8 @@ static int64_t
 sys_stat(int64_t path_addr, int64_t buf_addr, int64_t a2, int64_t a3)
 {
     (void)a2; (void)a3;
+    if (!uptr_valid((uint64_t)path_addr, 1)) return -1;
+    if (!uptr_valid((uint64_t)buf_addr, sizeof(VfsStat))) return -1;
     return (int64_t)vfs_stat((const char *)path_addr, (VfsStat *)buf_addr);
 }
 
