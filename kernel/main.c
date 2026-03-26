@@ -1418,6 +1418,13 @@ kernel_main(BootInfo *info)
     task_create_prio("shell",  shell_task, PRIORITY_HIGH);
     kprintf("[ok] Scheduler (preemptive)\n");
 
+    /* ── Self-tests ──────────────────────────────────────────────────── */
+    int test_failures = kernel_run_tests();
+    if (test_failures)
+        serial_write("TESTS FAILED\n");
+    else
+        serial_write("All tests passed.\n");
+
     kprintf("\nBoot complete.\n");
     serial_write("Boot complete.\n");
 

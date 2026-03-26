@@ -50,3 +50,4 @@ jobs:
           echo "--- boot.log ---"
           cat boot.log
           grep -q "Boot complete." boot.log
+          grep -q "All tests passed." boot.log
