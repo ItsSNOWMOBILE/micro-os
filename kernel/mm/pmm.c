@@ -202,11 +202,15 @@ pmm_init(void *mmap, uint32_t mmap_count,
 
 /* ── Allocation / Free ───────────────────────────────────────────────────── */
 
+/* Only hand out pages below 4 GiB — our identity map doesn't cover above. */
+#define PMM_MAX_PAGE  (0x100000000ULL / PAGE_SIZE)
+
 void *
 pmm_alloc_page(void)
 {
     spin_lock(&pmm_lock);
-    uint64_t qwords = bitmap_size / 8;
+    uint64_t max_page = total_pages < PMM_MAX_PAGE ? total_pages : PMM_MAX_PAGE;
+    uint64_t qwords = (max_page + 63) / 64;
 
     for (uint64_t i = 0; i < qwords; i++) {
         if (bitmap[i] == 0)
@@ -215,7 +219,7 @@ pmm_alloc_page(void)
         /* __builtin_ctzll: count trailing zeros — finds the lowest set bit. */
         int bit = __builtin_ctzll(bitmap[i]);
         uint64_t page = i * 64 + bit;
-        if (page >= total_pages) {
+        if (page >= max_page) {
             spin_unlock(&pmm_lock);
             return NULL;
         }
@@ -224,9 +228,6 @@ pmm_alloc_page(void)
         free_count--;
         spin_unlock(&pmm_lock);
 
-        /* Return physical address.  Callers that need zeroed pages must
-         * zero through their own virtual mapping (or via the identity map
-         * for addresses below 4 GiB). */
         return (void *)(page * PAGE_SIZE);
     }
 
